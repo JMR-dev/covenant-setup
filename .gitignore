@@ -1,3 +1,5 @@
 # Added by cargo
 /dist*
 /target
+/.vagrant/
+/vm/self-test/payload/

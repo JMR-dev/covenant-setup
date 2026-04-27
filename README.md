@@ -141,4 +141,37 @@ cargo fmt
 cargo check
 ```
 
-Interactive GUI/TUI flows have been exercised during development, but there is not yet a formal automated integration harness for packaged installer behavior.
+Interactive GUI/TUI flows now have a Windows VM smoke harness for packaged installer behavior, while broader automated coverage is still limited.
+
+## Windows VM Smoke Test
+
+A Windows Hyper-V Vagrant VM now lives in [`Vagrantfile`](C:\Users\jasonross\workspace\covenant-setup\Vagrantfile), and the host harness in [`scripts/run-windows-vm-smoke.ps1`](C:\Users\jasonross\workspace\covenant-setup\scripts\run-windows-vm-smoke.ps1) packages `covenant-setup`, boots the VM, opens Hyper-V's console viewer, and runs the packaged installer inside the guest's interactive desktop session.
+
+The self-install manifest used for this path lives at [`vm/self-test/install.toml`](C:\Users\jasonross\workspace\covenant-setup\vm\self-test\install.toml). The guest verifies that install produced:
+
+- `%LOCALAPPDATA%\CovenantSetupSelfTest\bin\covenant-setup.exe`
+- `%LOCALAPPDATA%\CovenantSetupSelfTest\journal.json`
+- `%LOCALAPPDATA%\CovenantSetupSelfTest\covenant-setup-uninstall.exe`
+- `HKCU\Software\CovenantSetupSelfTest\InstallRoot`
+- `Desktop\Covenant Setup Self Test.lnk`
+
+Run the smoke test from the repo root:
+
+```powershell
+$env:COVENANT_WINDOWS_BOX = "gusztavvargadr/windows-11"
+$env:COVENANT_HYPERV_SWITCH = "Default Switch"
+.\scripts\run-windows-vm-smoke.ps1
+```
+
+Notes:
+
+- The Vagrant provider is `hyperv`, and the box you choose must support that provider.
+- The harness opens `vmconnect.exe` after `vagrant up` so the guest desktop stays visible during the install.
+- The default Vagrant synced folder is disabled to avoid SMB credential prompts; the harness uploads the installer and guest scripts over WinRM instead.
+- The guest install is launched through an interactive scheduled task because WinRM sessions are not desktop-visible.
+- The packaged installer now has a hidden automation mode that suppresses blocking GUI message boxes while leaving the progress window visible for the VM smoke test.
+- The Windows box should auto-log the `vagrant` user into the desktop session for the visual install path to appear.
+- Set `COVENANT_HYPERV_SWITCH` to the Hyper-V virtual switch name you want Vagrant to use.
+- The harness writes its verification artifact to `dist\vagrant-self-test\guest-result.json`.
+- Use `-SkipViewer` if you do not want the harness to open the Hyper-V console window.
+- Use `-HaltAfter` or `-DestroyAfter` if you want the harness to stop the VM after the test run.

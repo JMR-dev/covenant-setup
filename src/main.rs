@@ -40,6 +40,8 @@ struct Cli {
     headless: bool,
     #[arg(long, global = true, action = ArgAction::SetTrue, conflicts_with = "headless")]
     headed: bool,
+    #[arg(long, global = true, hide = true, action = ArgAction::SetTrue)]
+    automation: bool,
     #[arg(long, global = true, action = ArgAction::SetTrue)]
     elevate: bool,
     #[command(subcommand)]
@@ -328,6 +330,7 @@ enum RuntimeMode {
 struct UiPreferences {
     headless: bool,
     headed: bool,
+    automation: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -698,18 +701,21 @@ fn run_bundled_installer(
     match mode {
         RuntimeMode::Bundled => {
             let ui_mode = select_ui(UiPhase::Install, preferences, logger)?;
-            if ui_mode == UiMode::Gui && !win::gui_confirm_install(&metadata.app_name, logger)? {
+            if ui_mode == UiMode::Gui
+                && !preferences.automation
+                && !win::gui_confirm_install(&metadata.app_name, logger)?
+            {
                 return Ok(());
             }
             match install(&manifest_path, Some(journal_path), true, ui_mode, logger) {
                 Ok(()) => {
-                    if ui_mode == UiMode::Gui {
+                    if ui_mode == UiMode::Gui && !preferences.automation {
                         win::gui_report_success(&metadata.app_name, logger)?;
                     }
                     Ok(())
                 }
                 Err(err) => {
-                    if ui_mode == UiMode::Gui {
+                    if ui_mode == UiMode::Gui && !preferences.automation {
                         win::gui_report_error(&err.to_string(), logger)?;
                     }
                     Err(err)
@@ -1335,6 +1341,7 @@ fn parse_ui_preferences(args: &[OsString]) -> UiPreferences {
     let mut preferences = UiPreferences {
         headless: false,
         headed: false,
+        automation: false,
     };
     for arg in args.iter().skip(1) {
         let value = arg.to_string_lossy();
@@ -1342,6 +1349,8 @@ fn parse_ui_preferences(args: &[OsString]) -> UiPreferences {
             preferences.headless = true;
         } else if value == "--headed" {
             preferences.headed = true;
+        } else if value == "--automation" {
+            preferences.automation = true;
         }
     }
     preferences
@@ -1351,6 +1360,7 @@ fn ui_preferences_from_cli(cli: &Cli) -> UiPreferences {
     UiPreferences {
         headless: cli.headless,
         headed: cli.headed,
+        automation: cli.automation,
     }
 }
 
