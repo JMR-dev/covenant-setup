@@ -3,3 +3,5 @@
 /target
 /.vagrant/
 /vm/self-test/payload/
+**/bin/
+**/obj/

@@ -1,4 +1,5 @@
 #![windows_subsystem = "windows"]
+mod ui;
 mod win;
 
 use clap::{ArgAction, Parser, Subcommand};
@@ -20,6 +21,7 @@ use std::sync::{
 use std::thread;
 use std::time::Duration;
 use thiserror::Error;
+use ui::GuiProgress;
 
 const EXIT_ELEVATION_REQUIRED: i32 = 33;
 const EXIT_OPERATION_FAILED: i32 = 1;
@@ -196,6 +198,18 @@ struct EmbeddedFile {
 struct EmbeddedBundle {
     metadata: PackagedApp,
     files: Vec<EmbeddedFile>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct EmbeddedBundleIndex {
+    metadata: PackagedApp,
+    files: Vec<EmbeddedFileIndexEntry>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct EmbeddedFileIndexEntry {
+    relative_path: String,
+    len: u64,
 }
 
 trait MutationTracker {
@@ -385,70 +399,15 @@ impl Drop for TuiProgress {
     }
 }
 
-struct GuiProgress {
-    state_path: PathBuf,
-    log_path: PathBuf,
-    total_steps: usize,
-}
-
-impl GuiProgress {
-    fn start(title: &str, initial_message: &str, total_steps: usize) -> Result<Self, AppError> {
-        let root = std::env::temp_dir().join("covenant-setup-ui");
-        fs::create_dir_all(&root)?;
-        let stamp = unique_ticks();
-        let state_path = root.join(format!("state-{stamp}.json"));
-        let log_path = root.join(format!("log-{stamp}.txt"));
-        fs::write(&log_path, b"")?;
-        write_progress_state(&state_path, title, initial_message, 0, total_steps, false)?;
-        spawn_gui_progress_window(&state_path, &log_path, title)?;
-        Ok(Self {
-            state_path,
-            log_path,
-            total_steps,
-        })
-    }
-
-    fn advance(&mut self, current_step: usize, message: &str) -> Result<(), AppError> {
-        append_progress_log(&self.log_path, message)?;
-        write_progress_state(
-            &self.state_path,
-            "",
-            message,
-            current_step,
-            self.total_steps,
-            false,
-        )?;
-        Ok(())
-    }
-
-    fn finish(&mut self, message: &str) -> Result<(), AppError> {
-        write_progress_state(
-            &self.state_path,
-            "",
-            message,
-            self.total_steps,
-            self.total_steps,
-            true,
-        )?;
-        Ok(())
-    }
-}
-
-impl Drop for GuiProgress {
-    fn drop(&mut self) {
-        let _ = write_progress_state(
-            &self.state_path,
-            "",
-            "Complete",
-            self.total_steps,
-            self.total_steps,
-            true,
-        );
-    }
-}
-
 fn main() {
     let args: Vec<_> = std::env::args_os().collect();
+    trace_event(
+        "process_start",
+        json!({
+            "pid": process::id(),
+            "args": args.iter().map(|arg| arg.to_string_lossy().to_string()).collect::<Vec<_>>()
+        }),
+    );
     if is_bundled_runtime_invocation(&args) {
         let logger = Logger {
             json: false,
@@ -460,7 +419,7 @@ fn main() {
                 Ok(()) => 0,
                 Err(AppError::Message(ref message)) if message == "__elevated_relaunch__" => 0,
                 Err(err) => {
-                    let _ = win::gui_report_error(&err.to_string(), &logger);
+                    let _ = ui::report_error(&err.to_string());
                     logger.error(err, EXIT_OPERATION_FAILED);
                     EXIT_OPERATION_FAILED
                 }
@@ -506,6 +465,7 @@ fn run(cli: Cli, logger: &Logger) -> Result<(), AppError> {
             &journal,
             cli.elevate,
             select_ui(UiPhase::Uninstall, preferences, logger)?,
+            preferences.automation,
             logger,
         ),
         Commands::Cleanup {
@@ -517,6 +477,7 @@ fn run(cli: Cli, logger: &Logger) -> Result<(), AppError> {
             install_root,
             app_name,
             select_ui(UiPhase::Cleanup, preferences, logger)?,
+            preferences.automation,
             logger,
         ),
     }
@@ -614,7 +575,35 @@ fn collect_bundle_files_recursive(
 }
 
 fn append_embedded_bundle(exe_target: &Path, bundle: &EmbeddedBundle) -> Result<(), AppError> {
-    let payload = serde_json::to_vec(bundle)?;
+    let index = EmbeddedBundleIndex {
+        metadata: PackagedApp {
+            app_name: bundle.metadata.app_name.clone(),
+            manifest: bundle.metadata.manifest.clone(),
+        },
+        files: bundle
+            .files
+            .iter()
+            .map(|file| EmbeddedFileIndexEntry {
+                relative_path: file.relative_path.clone(),
+                len: file.data.len() as u64,
+            })
+            .collect(),
+    };
+    let index_bytes = serde_json::to_vec(&index)?;
+    let mut payload = Vec::with_capacity(
+        std::mem::size_of::<u64>()
+            + index_bytes.len()
+            + bundle
+                .files
+                .iter()
+                .map(|file| file.data.len())
+                .sum::<usize>(),
+    );
+    payload.write_all(&(index_bytes.len() as u64).to_le_bytes())?;
+    payload.write_all(&index_bytes)?;
+    for file in &bundle.files {
+        payload.write_all(&file.data)?;
+    }
     let mut file = fs::OpenOptions::new().append(true).open(exe_target)?;
     file.write_all(&payload)?;
     file.write_all(&(payload.len() as u64).to_le_bytes())?;
@@ -646,7 +635,54 @@ fn read_embedded_bundle(exe_path: &Path) -> Result<Option<EmbeddedBundle>, AppEr
         ));
     }
     let payload_offset = size_offset - payload_len;
-    let bundle: EmbeddedBundle = serde_json::from_slice(&bytes[payload_offset..size_offset])?;
+    let payload = &bytes[payload_offset..size_offset];
+    if payload.len() < std::mem::size_of::<u64>() {
+        return Err(AppError::Message("Embedded payload is too short".into()));
+    }
+    let index_len = u64::from_le_bytes(
+        payload[..std::mem::size_of::<u64>()]
+            .try_into()
+            .map_err(|_| AppError::Message("Invalid embedded index length".into()))?,
+    ) as usize;
+    let index_offset = std::mem::size_of::<u64>();
+    let data_offset = index_offset
+        .checked_add(index_len)
+        .ok_or_else(|| AppError::Message("Embedded index length overflow".into()))?;
+    if data_offset > payload.len() {
+        return Err(AppError::Message(
+            "Embedded index length exceeds payload size".into(),
+        ));
+    }
+    let index: EmbeddedBundleIndex = serde_json::from_slice(&payload[index_offset..data_offset])?;
+    let EmbeddedBundleIndex {
+        metadata,
+        files: index_files,
+    } = index;
+    let mut cursor = data_offset;
+    let mut files = Vec::with_capacity(index_files.len());
+    for entry in index_files {
+        let len = entry.len as usize;
+        let end = cursor
+            .checked_add(len)
+            .ok_or_else(|| AppError::Message("Embedded file length overflow".into()))?;
+        if end > payload.len() {
+            return Err(AppError::Message(format!(
+                "Embedded file exceeds payload size: {}",
+                entry.relative_path
+            )));
+        }
+        files.push(EmbeddedFile {
+            relative_path: entry.relative_path,
+            data: payload[cursor..end].to_vec(),
+        });
+        cursor = end;
+    }
+    if cursor != payload.len() {
+        return Err(AppError::Message(
+            "Embedded payload has trailing bytes after file data".into(),
+        ));
+    }
+    let bundle = EmbeddedBundle { metadata, files };
     Ok(Some(bundle))
 }
 
@@ -687,36 +723,45 @@ fn run_bundled_installer(
     preferences: UiPreferences,
     logger: &Logger,
 ) -> Result<(), AppError> {
+    trace_event("bundled_installer_start", json!({}));
     let exe = std::env::current_exe()?;
     let bundle = read_embedded_bundle(&exe)?
         .ok_or_else(|| AppError::Message("No embedded package found in installer".into()))?;
     let extraction_root = extract_embedded_bundle(&exe, &bundle)?;
+    trace_event(
+        "bundled_installer_extracted",
+        json!({"exe": exe, "extraction_root": extraction_root}),
+    );
     let metadata = bundle.metadata;
     let manifest_path = extraction_root.join(metadata.manifest.clone());
-    let journal_path = exe
-        .parent()
-        .ok_or_else(|| AppError::Message("Packaged installer has no parent directory".into()))?
-        .join("journal.json");
-
     match mode {
         RuntimeMode::Bundled => {
             let ui_mode = select_ui(UiPhase::Install, preferences, logger)?;
+            trace_event(
+                "bundled_installer_ui_selected",
+                json!({"ui_mode": ui_mode_name(ui_mode), "automation": preferences.automation}),
+            );
             if ui_mode == UiMode::Gui
                 && !preferences.automation
-                && !win::gui_confirm_install(&metadata.app_name, logger)?
+                && !ui::confirm_install(&metadata.app_name)?
             {
                 return Ok(());
             }
-            match install(&manifest_path, Some(journal_path), true, ui_mode, logger) {
+            match install(&manifest_path, None, true, ui_mode, logger) {
                 Ok(()) => {
+                    trace_event("bundled_installer_install_ok", json!({}));
                     if ui_mode == UiMode::Gui && !preferences.automation {
-                        win::gui_report_success(&metadata.app_name, logger)?;
+                        ui::report_success(&metadata.app_name)?;
                     }
                     Ok(())
                 }
                 Err(err) => {
+                    trace_event(
+                        "bundled_installer_install_error",
+                        json!({"error": err.to_string()}),
+                    );
                     if ui_mode == UiMode::Gui && !preferences.automation {
-                        win::gui_report_error(&err.to_string(), logger)?;
+                        ui::report_error(&err.to_string())?;
                     }
                     Err(err)
                 }
@@ -733,6 +778,10 @@ fn install(
     logger: &Logger,
 ) -> Result<(), AppError> {
     let manifest: InstallManifest = toml::from_str(&fs::read_to_string(manifest_path)?)?;
+    trace_event(
+        "install_start",
+        json!({"manifest": manifest_path, "app_name": &manifest.app_name}),
+    );
     let app_name = manifest.app_name.clone();
     let _progress = start_tui_progress(ui_mode, format!("Installing {} ", manifest.app_name));
     let mut gui_progress = start_gui_progress(
@@ -750,6 +799,10 @@ fn install(
         let resolver = win::PathResolver::new(&effective_logger)?;
         let requires_admin = manifest_requires_admin(&manifest, &resolver)?;
         ensure_elevation_if_needed(requires_admin, elevate, &effective_logger)?;
+        trace_event(
+            "install_elevation_checked",
+            json!({"requires_admin": requires_admin, "elevate": elevate}),
+        );
         let runtime = build_install_runtime(
             &manifest,
             manifest_path,
@@ -932,6 +985,10 @@ fn install(
             fs::create_dir_all(parent)?;
         }
         fs::write(&runtime.journal_path, serde_json::to_vec_pretty(&journal)?)?;
+        trace_event(
+            "install_journal_written",
+            json!({"journal": runtime.journal_path, "actions": journal.actions.len()}),
+        );
         effective_logger.result(
             "ok",
             json!({"journal":runtime.journal_path,"actions":journal.actions.len()}),
@@ -947,6 +1004,10 @@ fn install(
     })();
 
     if let Err(err) = &result {
+        trace_event(
+            "install_error",
+            json!({"app_name": app_name, "error": err.to_string()}),
+        );
         let _ = fail_gui_progress(
             &mut gui_progress,
             &format!("{app_name} installation failed: {err}"),
@@ -960,9 +1021,14 @@ fn uninstall(
     journal_path: &Path,
     elevate: bool,
     ui_mode: UiMode,
+    automation: bool,
     logger: &Logger,
 ) -> Result<(), AppError> {
     let journal: Journal = serde_json::from_str(&fs::read_to_string(journal_path)?)?;
+    trace_event(
+        "uninstall_start",
+        json!({"journal": journal_path, "app_name": &journal.app_name}),
+    );
     let app_name = journal.app_name.clone();
     let _progress = start_tui_progress(ui_mode, format!("Uninstalling {} ", journal.app_name));
     let mut gui_progress = start_gui_progress(
@@ -980,6 +1046,10 @@ fn uninstall(
         let resolver = win::PathResolver::new(&effective_logger)?;
         let requires_admin = journal_requires_admin(&journal, &resolver)?;
         ensure_elevation_if_needed(requires_admin, elevate, &effective_logger)?;
+        trace_event(
+            "uninstall_elevation_checked",
+            json!({"requires_admin": requires_admin, "elevate": elevate}),
+        );
         let current_exe = std::env::current_exe().ok();
         let mut deferred_self_delete: Option<PathBuf> = None;
         let mut deferred_uninstall_registry: Vec<(RegistryRoot, String)> = Vec::new();
@@ -1082,6 +1152,7 @@ fn uninstall(
                 path.parent(),
                 &journal.app_name,
                 ui_mode,
+                automation,
                 &effective_logger,
             )?;
         } else {
@@ -1089,16 +1160,21 @@ fn uninstall(
                 &mut gui_progress,
                 &format!("{} uninstalled successfully!", journal.app_name),
             )?;
-            if ui_mode == UiMode::Gui {
-                win::gui_report_uninstall_success(&journal.app_name, &effective_logger)?;
+            if ui_mode == UiMode::Gui && !automation {
+                ui::report_uninstall_success(&journal.app_name)?;
             }
         }
 
         effective_logger.result("ok", json!({"journal":journal_path}));
+        trace_event("uninstall_ok", json!({"journal": journal_path}));
         Ok(())
     })();
 
     if let Err(err) = &result {
+        trace_event(
+            "uninstall_error",
+            json!({"app_name": app_name, "error": err.to_string()}),
+        );
         let _ = fail_gui_progress(
             &mut gui_progress,
             &format!("{app_name} uninstall failed: {err}"),
@@ -1113,8 +1189,13 @@ fn cleanup(
     install_root: Option<PathBuf>,
     app_name: String,
     ui_mode: UiMode,
+    automation: bool,
     logger: &Logger,
 ) -> Result<(), AppError> {
+    trace_event(
+        "cleanup_start",
+        json!({"target_exe": &target_exe, "install_root": &install_root, "app_name": &app_name}),
+    );
     let effective_logger = if ui_mode == UiMode::Tui {
         logger.quiet_clone()
     } else {
@@ -1140,13 +1221,13 @@ fn cleanup(
         }
     }
     reboot_required |= schedule_helper_self_cleanup(&effective_logger)?;
-    if ui_mode == UiMode::Gui {
+    if ui_mode == UiMode::Gui && !automation {
         if reboot_required {
-            if win::gui_prompt_uninstall_reboot(&app_name, &effective_logger)? {
+            if ui::prompt_uninstall_reboot(&app_name)? {
                 spawn_reboot(&effective_logger)?;
             }
         } else {
-            win::gui_report_uninstall_success(&app_name, &effective_logger)?;
+            ui::report_uninstall_success(&app_name)?;
         }
     } else if ui_mode == UiMode::Tui {
         if reboot_required {
@@ -1169,12 +1250,18 @@ fn ensure_elevation_if_needed(
     logger: &Logger,
 ) -> Result<(), AppError> {
     if !required || win::is_elevated(logger)? {
+        trace_event(
+            "elevation_ok",
+            json!({"required": required, "relaunch": relaunch}),
+        );
         return Ok(());
     }
     if relaunch {
+        trace_event("elevation_relaunch", json!({}));
         win::relaunch_as_admin(logger)?;
         return Err(AppError::Message("__elevated_relaunch__".into()));
     }
+    trace_event("elevation_required_error", json!({}));
     Err(AppError::Message(
         "Elevation required for requested operation".into(),
     ))
@@ -1297,6 +1384,7 @@ fn spawn_cleanup_helper(
     install_root: Option<&Path>,
     app_name: &str,
     ui_mode: UiMode,
+    automation: bool,
     logger: &Logger,
 ) -> Result<(), AppError> {
     let current_exe = std::env::current_exe()?;
@@ -1315,6 +1403,11 @@ fn spawn_cleanup_helper(
     command.creation_flags(CREATE_NO_WINDOW);
     if ui_mode == UiMode::Tui {
         command.arg("--headless");
+    } else if ui_mode == UiMode::Gui {
+        command.arg("--headed");
+    }
+    if automation {
+        command.arg("--automation");
     }
     command.arg("cleanup");
     command.arg("--target-exe");
@@ -1401,14 +1494,31 @@ fn select_ui(
     })
 }
 
+fn ui_mode_name(ui_mode: UiMode) -> &'static str {
+    match ui_mode {
+        UiMode::None => "none",
+        UiMode::Gui => "gui",
+        UiMode::Tui => "tui",
+    }
+}
+
 fn start_gui_progress(
     ui_mode: UiMode,
     title: &str,
     app_name: &str,
     total_steps: usize,
 ) -> Result<Option<GuiProgress>, AppError> {
+    trace_event(
+        "gui_progress_start",
+        json!({
+            "ui_mode": ui_mode_name(ui_mode),
+            "title": title,
+            "app_name": app_name,
+            "total_steps": total_steps.max(1)
+        }),
+    );
     if ui_mode == UiMode::Gui {
-        Ok(Some(GuiProgress::start(
+        Ok(Some(ui::GuiProgress::start(
             title,
             &format!("{title}"),
             total_steps.max(1),
@@ -1424,6 +1534,10 @@ fn advance_gui_progress(
     current_step: usize,
     message: &str,
 ) -> Result<(), AppError> {
+    trace_event(
+        "progress",
+        json!({"current_step": current_step, "message": message}),
+    );
     if let Some(progress) = gui_progress.as_mut() {
         progress.advance(current_step, message)?;
     }
@@ -1434,6 +1548,7 @@ fn finish_gui_progress(
     gui_progress: &mut Option<GuiProgress>,
     message: &str,
 ) -> Result<(), AppError> {
+    trace_event("progress_finish", json!({"message": message}));
     if let Some(progress) = gui_progress.as_mut() {
         progress.finish(message)?;
     }
@@ -1444,6 +1559,7 @@ fn fail_gui_progress(
     gui_progress: &mut Option<GuiProgress>,
     message: &str,
 ) -> Result<(), AppError> {
+    trace_event("progress_fail", json!({"message": message}));
     if let Some(progress) = gui_progress.as_mut() {
         progress.finish(message)?;
     }
@@ -1460,7 +1576,8 @@ fn append_gui_shell_output(
     if let Some(progress) = gui_progress.as_mut() {
         let text = String::from_utf8_lossy(bytes);
         for line in text.lines().filter(|line| !line.trim().is_empty()) {
-            append_progress_log(&progress.log_path, line)?;
+            trace_event("script_output", json!({"line": line}));
+            progress.log(line)?;
         }
     }
     Ok(())
@@ -1500,121 +1617,32 @@ fn schedule_helper_self_cleanup(logger: &Logger) -> Result<bool, AppError> {
     Ok(true)
 }
 
-fn write_progress_state(
-    state_path: &Path,
-    title: &str,
-    message: &str,
-    current_step: usize,
-    total_steps: usize,
-    complete: bool,
-) -> Result<(), AppError> {
-    let progress = if total_steps == 0 {
-        0
-    } else {
-        ((current_step.min(total_steps) * 100) / total_steps) as u64
+pub(crate) fn trace_event(phase: &str, detail: impl Serialize) {
+    let Ok(root) = std::env::var("COVENANT_SETUP_TRACE_DIR") else {
+        return;
     };
-    fs::write(
-        state_path,
-        serde_json::to_vec(&json!({
-            "title": title,
-            "message": message,
-            "progress": progress,
-            "complete": complete
-        }))?,
-    )?;
-    Ok(())
-}
+    if root.trim().is_empty() {
+        return;
+    }
 
-fn append_progress_log(log_path: &Path, line: &str) -> Result<(), AppError> {
-    let mut file = fs::OpenOptions::new().append(true).open(log_path)?;
-    writeln!(file, "{line}")?;
-    Ok(())
-}
-
-fn spawn_gui_progress_window(
-    state_path: &Path,
-    log_path: &Path,
-    title: &str,
-) -> Result<(), AppError> {
-    let state_path_ps = powershell_single_quote(&state_path.to_string_lossy());
-    let log_path_ps = powershell_single_quote(&log_path.to_string_lossy());
-    let title_ps = powershell_single_quote(title);
-    let script = format!(r#"
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-$statePath = '{state_path_ps}'
-$logPath = '{log_path_ps}'
-$windowTitle = '{title_ps}'
-$form = New-Object Windows.Forms.Form
-$form.Text = $windowTitle
-$form.Size = New-Object Drawing.Size(720,420)
-$form.StartPosition = 'CenterScreen'
-$label = New-Object Windows.Forms.Label
-$label.Location = New-Object Drawing.Point(12,12)
-$label.Size = New-Object Drawing.Size(680,24)
-$label.Text = $windowTitle
-$bar = New-Object Windows.Forms.ProgressBar
-$bar.Location = New-Object Drawing.Point(12,44)
-$bar.Size = New-Object Drawing.Size(680,24)
-$bar.Minimum = 0
-$bar.Maximum = 100
-$output = New-Object Windows.Forms.TextBox
-$output.Location = New-Object Drawing.Point(12,80)
-$output.Size = New-Object Drawing.Size(680,288)
-$output.Multiline = $true
-$output.ScrollBars = 'Vertical'
-$output.ReadOnly = $true
-$output.Font = New-Object Drawing.Font('Consolas',9)
-$timer = New-Object Windows.Forms.Timer
-$timer.Interval = 250
-$timer.Add_Tick(({{
-  try {{
-    if (Test-Path $statePath) {{
-      $state = Get-Content -LiteralPath $statePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-      if ($state.title) {{ $form.Text = $state.title }}
-      $label.Text = $state.message
-      $bar.Value = [Math]::Max(0, [Math]::Min(100, [int]$state.progress))
-      if ([bool]$state.complete) {{
-        $timer.Stop()
-        $form.Close()
-      }}
-    }}
-  }} catch {{
-    # Ignore transient reads while Rust updates the state file.
-  }}
-  try {{
-    if (Test-Path $logPath) {{
-      $text = Get-Content -LiteralPath $logPath -Raw -ErrorAction Stop
-      if ($output.Text -ne $text) {{
-        $output.Text = $text
-        $output.SelectionStart = $output.Text.Length
-        $output.ScrollToCaret()
-      }}
-    }}
-  }} catch {{
-    # Ignore transient reads while Rust updates the log file.
-  }}
-}}).GetNewClosure())
-$form.Controls.Add($label)
-$form.Controls.Add($bar)
-$form.Controls.Add($output)
-$timer.Start()
-[void]$form.ShowDialog()
-"#);
-    let script_path = state_path.with_extension("ps1");
-    fs::write(&script_path, &script)?;
-    let mut command = Command::new("powershell.exe");
-    command.creation_flags(CREATE_NO_WINDOW);
-    command.arg("-STA");
-    command.arg("-NoProfile");
-    command.arg("-ExecutionPolicy");
-    command.arg("Bypass");
-    command.arg("-WindowStyle");
-    command.arg("Hidden");
-    command.arg("-File");
-    command.arg(&script_path);
-    command.spawn()?;
-    Ok(())
+    let root = PathBuf::from(root);
+    if fs::create_dir_all(&root).is_err() {
+        return;
+    }
+    let path = root.join(format!("installer-heartbeat-{}.jsonl", process::id()));
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    let event = json!({
+        "time_unix_ms": timestamp,
+        "pid": process::id(),
+        "phase": phase,
+        "detail": detail
+    });
+    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{event}");
+    }
 }
 
 fn unique_ticks() -> u128 {
@@ -1735,6 +1763,10 @@ fn execute_script(
     working_directory: Option<&Path>,
     gui_progress: &mut Option<GuiProgress>,
 ) -> Result<(), AppError> {
+    trace_event(
+        "script_start",
+        json!({"command": &script.command, "args": &script.args, "working_directory": working_directory}),
+    );
     let command_path = absolutize(manifest_dir, &script.command);
     let command = if command_path.exists() {
         command_path
@@ -1751,6 +1783,10 @@ fn execute_script(
     append_gui_shell_output(gui_progress, &output.stdout)?;
     append_gui_shell_output(gui_progress, &output.stderr)?;
     let status = output.status;
+    trace_event(
+        "script_exit",
+        json!({"command": &script.command, "status": status.code()}),
+    );
     if !status.success() {
         return Err(AppError::Message(format!(
             "Script failed: {} ({status})",

@@ -29,15 +29,11 @@ use windows::Win32::System::RestartManager::{
     RM_PROCESS_INFO, RmEndSession, RmGetList, RmRegisterResources, RmStartSession,
 };
 use windows::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId, OpenProcessToken};
-use windows::Win32::UI::Controls::{
-    TASKDIALOG_COMMON_BUTTON_FLAGS, TDCBF_CANCEL_BUTTON, TDCBF_NO_BUTTON, TDCBF_OK_BUTTON,
-    TDCBF_YES_BUTTON, TaskDialog,
-};
 use windows::Win32::UI::Shell::{
     FOLDERID_Desktop, FOLDERID_LocalAppData, FOLDERID_ProgramFilesX64, IShellLinkW,
     KNOWN_FOLDER_FLAG, SHGetKnownFolderPath, ShellExecuteW, ShellLink,
 };
-use windows::Win32::UI::WindowsAndMessaging::{IDOK, IDYES, SW_SHOW};
+use windows::Win32::UI::WindowsAndMessaging::SW_SHOW;
 use windows::core::{Interface, PCWSTR, PWSTR, w};
 
 pub struct PathResolver {
@@ -186,90 +182,6 @@ pub fn relaunch_as_admin(logger: &Logger) -> Result<(), AppError> {
         return Err(AppError::Message(format!("ShellExecuteW failed: {code}")));
     }
     Ok(())
-}
-
-pub fn message_box(
-    title: &str,
-    body: &str,
-    buttons: TASKDIALOG_COMMON_BUTTON_FLAGS,
-    icon: PCWSTR,
-    logger: &Logger,
-) -> Result<i32, AppError> {
-    let mut button = 0i32;
-    let title_w = Utf16Arg::from_str(title);
-    let body_w = Utf16Arg::from_str(body);
-    logger.unsafe_enter("TaskDialog", json!({"title":title}));
-    unsafe {
-        TaskDialog(
-            Some(HWND::default()),
-            None,
-            PCWSTR(title_w.as_ptr()),
-            PCWSTR::null(),
-            PCWSTR(body_w.as_ptr()),
-            buttons,
-            icon,
-            Some(&mut button),
-        )?
-    };
-    logger.unsafe_exit("TaskDialog", json!({"result": button}));
-    Ok(button)
-}
-
-pub fn gui_confirm_install(app_name: &str, logger: &Logger) -> Result<bool, AppError> {
-    let result = message_box(
-        "covenant-setup",
-        &format!("Install {app_name} now?"),
-        TDCBF_OK_BUTTON | TDCBF_CANCEL_BUTTON,
-        td_information_icon(),
-        logger,
-    )?;
-    Ok(result == IDOK.0)
-}
-
-pub fn gui_report_success(app_name: &str, logger: &Logger) -> Result<(), AppError> {
-    let _ = message_box(
-        "covenant-setup",
-        &format!("{app_name} installation completed successfully"),
-        TDCBF_OK_BUTTON,
-        td_information_icon(),
-        logger,
-    )?;
-    Ok(())
-}
-
-pub fn gui_report_error(message: &str, logger: &Logger) -> Result<(), AppError> {
-    let _ = message_box(
-        "covenant-setup",
-        message,
-        TDCBF_OK_BUTTON,
-        td_error_icon(),
-        logger,
-    )?;
-    Ok(())
-}
-
-pub fn gui_report_uninstall_success(app_name: &str, logger: &Logger) -> Result<(), AppError> {
-    let _ = message_box(
-        "covenant-setup",
-        &format!("{app_name} uninstalled successfully!"),
-        TDCBF_OK_BUTTON,
-        td_information_icon(),
-        logger,
-    )?;
-    Ok(())
-}
-
-pub fn gui_prompt_uninstall_reboot(app_name: &str, logger: &Logger) -> Result<bool, AppError> {
-    let result = message_box(
-        "covenant-setup",
-        &format!(
-            "{app_name} uninstalled sucessfully! Some files from the program still remain on your computer. To complete removal of these files, restart your computer now."
-        ),
-        TDCBF_YES_BUTTON | TDCBF_NO_BUTTON,
-        td_information_icon(),
-        logger,
-    )?;
-    Ok(result == IDYES.0)
 }
 
 pub fn create_directory_recursive(path: &Path, logger: &Logger) -> Result<(), AppError> {
@@ -612,14 +524,6 @@ fn root_hkey(root: RegistryRoot) -> HKEY {
         RegistryRoot::Hkcu => HKEY_CURRENT_USER,
         RegistryRoot::Hklm => HKEY_LOCAL_MACHINE,
     }
-}
-
-fn td_information_icon() -> PCWSTR {
-    PCWSTR(std::ptr::without_provenance(0xFFFD))
-}
-
-fn td_error_icon() -> PCWSTR {
-    PCWSTR(std::ptr::without_provenance(0xFFFE))
 }
 
 fn win32_ok(status: WIN32_ERROR, operation: &str) -> Result<(), AppError> {

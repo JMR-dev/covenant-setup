@@ -27,6 +27,8 @@ Its current shape is:
 - Uninstalls in reverse order and purges declared registry/path namespaces
 - Registers the installed app in Windows Installed Apps / Add-Remove Programs
 - Creates an installed uninstaller executable in the app root
+- Uses a C# WinForms presentation process for GUI progress and prompts
+- Sends GUI state over named-pipe IPC from the Rust engine to the C# UI
 - Uses Win32 APIs through the `windows` crate with unsafe isolated in [`src/win.rs`](C:\Users\jasonross\workspace\covenant-setup\src\win.rs)
 - Logs every unsafe boundary transition
 
@@ -43,6 +45,8 @@ Current output:
 - `dist\covenant-setup-installer.exe`
 
 That installer is a single executable. The manifest and payload files are embedded into the binary and extracted to a temporary working directory at runtime.
+
+The Rust build publishes a self-contained C# WinForms UI helper and embeds it into the Rust executable. Building the installer therefore requires the .NET SDK in addition to Rust/Cargo, but the packaged installer does not require a .NET runtime to be preinstalled on the target machine.
 
 ## Install and Uninstall Model
 
@@ -87,12 +91,14 @@ Current automatic behavior:
 
 Current GUI behavior includes:
 
-- native message-box prompts for confirmation and completion
+- C# WinForms prompts for confirmation and completion
 - a progress window with:
   - progress bar
   - current operation text
   - scrolling operations log
 - reboot prompt when uninstall requires reboot to finish some cleanup
+
+The Rust install engine owns all business logic and file/registry mutations. The C# process is presentation-only and receives JSON messages over a Windows named pipe.
 
 ### TUI
 
@@ -124,11 +130,11 @@ The sample manifest lives at [`examples/install.toml`](C:\Users\jasonross\worksp
 
 ## Current Limitations
 
-- The GUI layer is currently implemented through a PowerShell-hosted WinForms progress window rather than a native Rust GUI framework
+- The GUI helper is embedded as a self-contained C# WinForms executable, which makes the installer binary substantially larger
 - The installer is not yet generating branded/custom themed installer screens
 - The manifest schema is still MVP-level and does not cover all production installer concerns
 - Script execution logs the script invocation; internal script mutations are not observed beyond declared purge coverage
-- The packager currently embeds payload as JSON-appended data; this is functional but not yet optimized for large payloads or tamper-resistance
+- The packager currently embeds payload in an appended raw bundle; this is functional but not yet compressed, signed, or tamper-resistant
 - No signing, MSI generation, compression, delta updates, or patching pipeline exists yet
 - No automated test suite has been added yet for end-to-end installer scenarios
 
@@ -139,6 +145,7 @@ The codebase currently builds and formats successfully with:
 ```powershell
 cargo fmt
 cargo check
+cargo build --release
 ```
 
 Interactive GUI/TUI flows now have a Windows VM smoke harness for packaged installer behavior, while broader automated coverage is still limited.
@@ -155,6 +162,8 @@ The self-install manifest used for this path lives at [`vm/self-test/install.tom
 - `HKCU\Software\CovenantSetupSelfTest\InstallRoot`
 - `Desktop\Covenant Setup Self Test.lnk`
 
+It then immediately invokes the installed uninstaller with the generated journal and verifies that the install root, payload, journal, uninstaller, shortcut, application registry key, and Installed Apps registration are removed.
+
 Run the smoke test from the repo root:
 
 ```powershell
@@ -169,7 +178,8 @@ Notes:
 - The harness opens `vmconnect.exe` after `vagrant up` so the guest desktop stays visible during the install.
 - The default Vagrant synced folder is disabled to avoid SMB credential prompts; the harness uploads the installer and guest scripts over WinRM instead.
 - The guest install is launched through an interactive scheduled task because WinRM sessions are not desktop-visible.
-- The packaged installer now has a hidden automation mode that suppresses blocking GUI message boxes while leaving the progress window visible for the VM smoke test.
+- The packaged installer now has a hidden automation mode that suppresses blocking GUI prompts while leaving the C# progress window visible for the VM smoke test.
+- The guest scripts write a trace bundle under `dist\vagrant-self-test\trace` after each smoke run. It includes `guest-events.jsonl`, scheduler/process/event snapshots, Rust heartbeat files named `installer-heartbeat-*.jsonl`, and C# UI pipe logs named `csharp-ui-pipe-*.jsonl`.
 - The Windows box should auto-log the `vagrant` user into the desktop session for the visual install path to appear.
 - Set `COVENANT_HYPERV_SWITCH` to the Hyper-V virtual switch name you want Vagrant to use.
 - The harness writes its verification artifact to `dist\vagrant-self-test\guest-result.json`.
