@@ -1,2 +1,8 @@
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# Linux cross-build (optional). Only takes effect when you explicitly pass
+# `--target x86_64-pc-windows-gnu`. Windows builds (the default) are unaffected.
+# See README "Linux cross-build" for prerequisites.
+[target.x86_64-pc-windows-gnu]
+runner = "wine"

@@ -150,6 +150,29 @@ cargo build --release
 
 Interactive GUI/TUI flows now have a Windows VM smoke harness for packaged installer behavior, while broader automated coverage is still limited.
 
+## Linux Cross-Build (Optional)
+
+Day-to-day work happens on Windows. This section documents an opt-in path for type-checking and running unit tests from a Linux host (useful for CI containers or quick iteration without a VM).
+
+Prerequisites (Ubuntu 24.04 names):
+
+- `dotnet-sdk-10.0` — the C# UI build script (`build.rs`) invokes `dotnet publish`.
+- `mingw-w64` — provides the `x86_64-w64-mingw32-*` toolchain that the `windows-gnu` target links against.
+- `wine` — runs the resulting test binary. Already wired up via `runner = "wine"` in [`.cargo/config.toml`](.cargo/config.toml) for the `x86_64-pc-windows-gnu` target only.
+- `rustup target add x86_64-pc-windows-gnu`.
+
+The dotnet SDK needs `EnableWindowsTargeting=true` to cross-build a `net8.0-windows` project from Linux:
+
+```bash
+EnableWindowsTargeting=true cargo check --target x86_64-pc-windows-gnu
+EnableWindowsTargeting=true cargo test  --target x86_64-pc-windows-gnu
+```
+
+Caveats:
+
+- `cargo run` (and the `package`/`install`/`uninstall` flows generally) require real Win32 — Wine handles unit-test execution but is not a substitute for the Windows VM smoke harness.
+- The `windows-msvc` target (the default on Windows) is unaffected by this section.
+
 ## Windows VM Smoke Test
 
 A Windows Hyper-V Vagrant VM now lives in [`Vagrantfile`](C:\Users\jasonross\workspace\covenant-setup\Vagrantfile), and the host harness in [`scripts/run-windows-vm-smoke.ps1`](C:\Users\jasonross\workspace\covenant-setup\scripts\run-windows-vm-smoke.ps1) packages `covenant-setup`, boots the VM, opens Hyper-V's console viewer, and runs the packaged installer inside the guest's interactive desktop session.
