@@ -30,16 +30,20 @@ use windows::Win32::System::RestartManager::{
 };
 use windows::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId, OpenProcessToken};
 use windows::Win32::UI::Shell::{
-    FOLDERID_Desktop, FOLDERID_LocalAppData, FOLDERID_ProgramFilesX64, IShellLinkW,
-    KNOWN_FOLDER_FLAG, SHGetKnownFolderPath, ShellExecuteW, ShellLink,
+    FOLDERID_Desktop, FOLDERID_LocalAppData, FOLDERID_ProgramFilesX64, FOLDERID_ProgramFilesX86,
+    FOLDERID_Windows, IShellLinkW, KNOWN_FOLDER_FLAG, SHGetKnownFolderPath, ShellExecuteW,
+    ShellLink,
 };
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOW;
 use windows::core::{Interface, PCWSTR, PWSTR, w};
 
 pub struct PathResolver {
     pub program_files_x64: PathBuf,
+    pub program_files_x86: PathBuf,
+    pub windows_dir: PathBuf,
     pub local_app_data: PathBuf,
     pub desktop: PathBuf,
+    admin_roots: Vec<String>,
 }
 
 pub fn is_parent_powershell(logger: &Logger) -> Result<bool, AppError> {
@@ -113,10 +117,17 @@ pub fn is_parent_powershell(logger: &Logger) -> Result<bool, AppError> {
 
 impl PathResolver {
     pub fn new(logger: &Logger) -> Result<Self, AppError> {
+        let program_files_x64 = known_folder(&FOLDERID_ProgramFilesX64, logger)?;
+        let program_files_x86 = known_folder(&FOLDERID_ProgramFilesX86, logger)?;
+        let windows_dir = known_folder(&FOLDERID_Windows, logger)?;
+        let admin_roots = build_admin_roots(&[&program_files_x64, &program_files_x86, &windows_dir]);
         Ok(Self {
-            program_files_x64: known_folder(&FOLDERID_ProgramFilesX64, logger)?,
+            program_files_x64,
+            program_files_x86,
+            windows_dir,
             local_app_data: known_folder(&FOLDERID_LocalAppData, logger)?,
             desktop: known_folder(&FOLDERID_Desktop, logger)?,
+            admin_roots,
         })
     }
 
@@ -131,6 +142,45 @@ impl PathResolver {
                 .replace("{Desktop}", &self.desktop.to_string_lossy()),
         )
     }
+
+    pub fn requires_admin(&self, path: &Path) -> bool {
+        let candidate = normalize_for_admin_match(path);
+        self.admin_roots.iter().any(|root| {
+            candidate == *root || candidate.starts_with(&format!("{root}\\"))
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_roots_for_test(roots: Vec<PathBuf>) -> Self {
+        let admin_roots = build_admin_roots(&roots.iter().collect::<Vec<_>>());
+        Self {
+            program_files_x64: PathBuf::new(),
+            program_files_x86: PathBuf::new(),
+            windows_dir: PathBuf::new(),
+            local_app_data: PathBuf::new(),
+            desktop: PathBuf::new(),
+            admin_roots,
+        }
+    }
+}
+
+fn build_admin_roots(roots: &[&PathBuf]) -> Vec<String> {
+    roots
+        .iter()
+        .map(|p| {
+            let lower = p.to_string_lossy().replace('/', "\\").to_ascii_lowercase();
+            lower.trim_end_matches('\\').to_string()
+        })
+        .filter(|root| !root.is_empty())
+        .collect()
+}
+
+fn normalize_for_admin_match(path: &Path) -> String {
+    let lower = path
+        .to_string_lossy()
+        .replace('/', "\\")
+        .to_ascii_lowercase();
+    lower.trim_end_matches('\\').to_string()
 }
 
 pub fn is_elevated(logger: &Logger) -> Result<bool, AppError> {
@@ -572,5 +622,76 @@ impl Utf16Arg {
                 self.inner.len() * std::mem::size_of::<u16>(),
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn resolver() -> PathResolver {
+        PathResolver::with_roots_for_test(vec![
+            PathBuf::from("C:\\Program Files"),
+            PathBuf::from("C:\\Program Files (x86)"),
+            PathBuf::from("D:\\Windows"),
+        ])
+    }
+
+    #[test]
+    fn requires_admin_matches_subpaths() {
+        let r = resolver();
+        assert!(r.requires_admin(Path::new("C:\\Program Files\\App\\bin")));
+        assert!(r.requires_admin(Path::new("C:\\Program Files (x86)\\Vendor\\app.exe")));
+        assert!(r.requires_admin(Path::new("D:\\Windows\\System32\\drivers")));
+    }
+
+    #[test]
+    fn requires_admin_matches_exact_root() {
+        let r = resolver();
+        assert!(r.requires_admin(Path::new("C:\\Program Files")));
+        assert!(r.requires_admin(Path::new("C:\\Program Files\\")));
+    }
+
+    #[test]
+    fn requires_admin_rejects_sibling_prefix() {
+        let r = resolver();
+        assert!(!r.requires_admin(Path::new("C:\\Program Files Custom\\App")));
+        assert!(!r.requires_admin(Path::new("C:\\Program Files2\\App")));
+        assert!(!r.requires_admin(Path::new("D:\\WindowsApps\\thing")));
+    }
+
+    #[test]
+    fn requires_admin_rejects_user_paths() {
+        let r = resolver();
+        assert!(!r.requires_admin(Path::new("C:\\Users\\alice\\AppData\\Local\\App")));
+        assert!(!r.requires_admin(Path::new("D:\\data\\App")));
+        assert!(!r.requires_admin(Path::new("E:\\")));
+    }
+
+    #[test]
+    fn requires_admin_is_case_insensitive() {
+        let r = resolver();
+        assert!(r.requires_admin(Path::new("c:\\PROGRAM FILES\\App")));
+        assert!(r.requires_admin(Path::new("D:\\windows\\System32")));
+    }
+
+    #[test]
+    fn requires_admin_normalizes_forward_slashes() {
+        let r = resolver();
+        assert!(r.requires_admin(Path::new("C:/Program Files/App/bin")));
+        assert!(r.requires_admin(Path::new("D:/Windows/System32")));
+    }
+
+    #[test]
+    fn requires_admin_handles_non_windows_roots() {
+        let r = PathResolver::with_roots_for_test(vec![PathBuf::from("E:\\Apps\\Program Files")]);
+        assert!(r.requires_admin(Path::new("E:\\Apps\\Program Files\\App")));
+        assert!(!r.requires_admin(Path::new("C:\\Program Files\\App")));
+    }
+
+    #[test]
+    fn requires_admin_with_empty_roots_returns_false() {
+        let r = PathResolver::with_roots_for_test(vec![]);
+        assert!(!r.requires_admin(Path::new("C:\\Program Files\\App")));
     }
 }

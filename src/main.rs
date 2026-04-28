@@ -1699,17 +1699,17 @@ fn manifest_requires_admin(
     resolver: &win::PathResolver,
 ) -> Result<bool, AppError> {
     for directory in &manifest.directories {
-        if path_requires_admin(&resolver.resolve(&directory.path)) {
+        if resolver.requires_admin(&resolver.resolve(&directory.path)) {
             return Ok(true);
         }
     }
     for file in &manifest.files {
-        if path_requires_admin(&resolver.resolve(&file.destination)) {
+        if resolver.requires_admin(&resolver.resolve(&file.destination)) {
             return Ok(true);
         }
     }
     for shortcut in &manifest.shortcuts {
-        if path_requires_admin(&resolver.resolve(&shortcut.path)) {
+        if resolver.requires_admin(&resolver.resolve(&shortcut.path)) {
             return Ok(true);
         }
     }
@@ -1733,7 +1733,7 @@ fn journal_requires_admin(
                 destination: path, ..
             }
             | JournalAction::CreateShortcut { path } => {
-                if path_requires_admin(path) {
+                if resolver.requires_admin(path) {
                     return Ok(true);
                 }
             }
@@ -1750,7 +1750,7 @@ fn journal_requires_admin(
         }
     }
     for path in &journal.purge.paths {
-        if path_requires_admin(&resolver.resolve(path)) {
+        if resolver.requires_admin(&resolver.resolve(path)) {
             return Ok(true);
         }
     }
@@ -1839,11 +1839,6 @@ fn normalize_path_for_compare(path: &Path) -> String {
     path.to_string_lossy()
         .replace('/', "\\")
         .to_ascii_lowercase()
-}
-
-fn path_requires_admin(path: &Path) -> bool {
-    let path = path.to_string_lossy().to_ascii_lowercase();
-    path.starts_with("c:\\program files") || path.starts_with("c:\\windows")
 }
 
 fn absolutize(base: Option<&Path>, value: &str) -> PathBuf {
