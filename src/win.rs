@@ -178,6 +178,51 @@ fn normalize_for_admin_match(path: &Path) -> String {
     lower.trim_end_matches('\\').to_string()
 }
 
+// Encodes a single argument for a Windows command line that will be parsed by
+// CommandLineToArgvW (which is what ShellExecuteW's lpParameters feeds into,
+// and what every standard Win32 process startup uses to populate argv).
+//
+// Rules: quote if empty or contains space/tab/quote; inside quotes, escape `"`
+// as `\"` and double any run of backslashes that immediately precedes a quote
+// or the closing quote.
+fn quote_command_line_arg(arg: &str) -> String {
+    let needs_quoting = arg.is_empty()
+        || arg
+            .chars()
+            .any(|c| c == ' ' || c == '\t' || c == '"');
+    if !needs_quoting {
+        return arg.to_string();
+    }
+
+    let mut out = String::with_capacity(arg.len() + 2);
+    out.push('"');
+    let mut backslashes = 0usize;
+    for c in arg.chars() {
+        match c {
+            '\\' => backslashes += 1,
+            '"' => {
+                for _ in 0..(backslashes * 2 + 1) {
+                    out.push('\\');
+                }
+                out.push('"');
+                backslashes = 0;
+            }
+            _ => {
+                for _ in 0..backslashes {
+                    out.push('\\');
+                }
+                out.push(c);
+                backslashes = 0;
+            }
+        }
+    }
+    for _ in 0..(backslashes * 2) {
+        out.push('\\');
+    }
+    out.push('"');
+    out
+}
+
 pub fn is_elevated(logger: &Logger) -> Result<bool, AppError> {
     let mut token = HANDLE::default();
     logger.unsafe_enter("OpenProcessToken", json!({}));
@@ -206,7 +251,11 @@ pub fn is_elevated(logger: &Logger) -> Result<bool, AppError> {
 
 pub fn relaunch_as_admin(logger: &Logger) -> Result<(), AppError> {
     let exe = std::env::current_exe()?;
-    let params = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
+    let params = std::env::args()
+        .skip(1)
+        .map(|arg| quote_command_line_arg(&arg))
+        .collect::<Vec<_>>()
+        .join(" ");
     logger.unsafe_enter(
         "ShellExecuteW",
         json!({"verb":"runas","exe":exe,"params":params}),
@@ -688,5 +737,131 @@ mod tests {
     fn requires_admin_with_empty_roots_returns_false() {
         let r = PathResolver::with_roots_for_test(vec![]);
         assert!(!r.requires_admin(Path::new("C:\\Program Files\\App")));
+    }
+
+    #[test]
+    fn quote_passthrough_when_no_special_chars() {
+        assert_eq!(quote_command_line_arg("install"), "install");
+        assert_eq!(quote_command_line_arg("C:\\Apps\\foo.exe"), "C:\\Apps\\foo.exe");
+        assert_eq!(quote_command_line_arg("--json"), "--json");
+    }
+
+    #[test]
+    fn quote_wraps_when_contains_space_or_tab() {
+        assert_eq!(quote_command_line_arg("hello world"), "\"hello world\"");
+        assert_eq!(quote_command_line_arg("a\tb"), "\"a\tb\"");
+        assert_eq!(
+            quote_command_line_arg("C:\\Program Files\\App\\install.toml"),
+            "\"C:\\Program Files\\App\\install.toml\""
+        );
+    }
+
+    #[test]
+    fn quote_escapes_embedded_double_quotes() {
+        assert_eq!(quote_command_line_arg("a\"b"), "\"a\\\"b\"");
+        assert_eq!(quote_command_line_arg("\""), "\"\\\"\"");
+    }
+
+    #[test]
+    fn quote_doubles_trailing_backslashes_before_closing_quote() {
+        // "C:\Path\" must serialize as "\"C:\\Path\\\\\"" so the parser sees
+        // the backslashes as literals and the final quote as the terminator.
+        assert_eq!(
+            quote_command_line_arg("C:\\Path with space\\"),
+            "\"C:\\Path with space\\\\\""
+        );
+    }
+
+    #[test]
+    fn quote_doubles_backslashes_only_when_followed_by_quote() {
+        // \\ inside an unquoted-needing arg stays \\ when not before a quote.
+        assert_eq!(
+            quote_command_line_arg("a\\\\b c"),
+            "\"a\\\\b c\""
+        );
+        // \\ immediately before a literal quote becomes \\\\\".
+        assert_eq!(
+            quote_command_line_arg("a\\\\\"b"),
+            "\"a\\\\\\\\\\\"b\""
+        );
+    }
+
+    #[test]
+    fn quote_emits_explicit_empty_argument() {
+        assert_eq!(quote_command_line_arg(""), "\"\"");
+    }
+
+    #[test]
+    fn quote_round_trips_through_argv_rules() {
+        // Sanity-check that re-parsing the quoted form per the
+        // CommandLineToArgvW spec recovers the original argument.
+        for input in [
+            "simple",
+            "with space",
+            "a\"b",
+            "C:\\Program Files\\app\\bin",
+            "C:\\Path with space\\",
+            "trailing\\\\",
+            "embedded\\\"quote",
+            "",
+        ] {
+            let quoted = quote_command_line_arg(input);
+            let parsed = parse_argv_for_test(&quoted);
+            assert_eq!(parsed, vec![input.to_string()], "input was {input:?}");
+        }
+    }
+
+    // Reference parser following the CommandLineToArgvW algorithm, used only
+    // to validate the encoder above.
+    fn parse_argv_for_test(line: &str) -> Vec<String> {
+        let mut args = Vec::new();
+        let mut current = String::new();
+        let mut in_quotes = false;
+        let mut backslashes = 0usize;
+        let mut started = false;
+
+        let flush_backslashes = |current: &mut String, n: usize| {
+            for _ in 0..n {
+                current.push('\\');
+            }
+        };
+
+        for c in line.chars() {
+            match c {
+                '\\' => {
+                    backslashes += 1;
+                    started = true;
+                }
+                '"' => {
+                    flush_backslashes(&mut current, backslashes / 2);
+                    if backslashes % 2 == 1 {
+                        current.push('"');
+                    } else {
+                        in_quotes = !in_quotes;
+                    }
+                    backslashes = 0;
+                    started = true;
+                }
+                ' ' | '\t' if !in_quotes => {
+                    flush_backslashes(&mut current, backslashes);
+                    backslashes = 0;
+                    if started {
+                        args.push(std::mem::take(&mut current));
+                        started = false;
+                    }
+                }
+                _ => {
+                    flush_backslashes(&mut current, backslashes);
+                    backslashes = 0;
+                    current.push(c);
+                    started = true;
+                }
+            }
+        }
+        flush_backslashes(&mut current, backslashes);
+        if started {
+            args.push(current);
+        }
+        args
     }
 }
