@@ -39,8 +39,6 @@ use windows::core::{Interface, PCWSTR, PWSTR, w};
 
 pub struct PathResolver {
     pub program_files_x64: PathBuf,
-    pub program_files_x86: PathBuf,
-    pub windows_dir: PathBuf,
     pub local_app_data: PathBuf,
     pub desktop: PathBuf,
     admin_roots: Vec<String>,
@@ -120,11 +118,10 @@ impl PathResolver {
         let program_files_x64 = known_folder(&FOLDERID_ProgramFilesX64, logger)?;
         let program_files_x86 = known_folder(&FOLDERID_ProgramFilesX86, logger)?;
         let windows_dir = known_folder(&FOLDERID_Windows, logger)?;
-        let admin_roots = build_admin_roots(&[&program_files_x64, &program_files_x86, &windows_dir]);
+        let admin_roots =
+            build_admin_roots(&[&program_files_x64, &program_files_x86, &windows_dir]);
         Ok(Self {
             program_files_x64,
-            program_files_x86,
-            windows_dir,
             local_app_data: known_folder(&FOLDERID_LocalAppData, logger)?,
             desktop: known_folder(&FOLDERID_Desktop, logger)?,
             admin_roots,
@@ -155,8 +152,6 @@ impl PathResolver {
         let admin_roots = build_admin_roots(&roots.iter().collect::<Vec<_>>());
         Self {
             program_files_x64: PathBuf::new(),
-            program_files_x86: PathBuf::new(),
-            windows_dir: PathBuf::new(),
             local_app_data: PathBuf::new(),
             desktop: PathBuf::new(),
             admin_roots,
