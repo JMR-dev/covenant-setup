@@ -1,0 +1,25 @@
+app_name = "Covenant Setup Self Test"
+
+[[directories]]
+path = "{LocalAppData}\\CovenantSetupSelfTest"
+
+[[directories]]
+path = "{LocalAppData}\\CovenantSetupSelfTest\\bin"
+
+[[files]]
+source = "payload\\covenant-setup.exe"
+destination = "{LocalAppData}\\CovenantSetupSelfTest\\bin\\covenant-setup.exe"
+
+[[registry]]
+key = "HKCU\\Software\\CovenantSetupSelfTest"
+name = "InstallRoot"
+value = "{LocalAppData}\\CovenantSetupSelfTest"
+
+[[shortcuts]]
+path = "{Desktop}\\Covenant Setup Self Test.lnk"
+target = "{LocalAppData}\\CovenantSetupSelfTest\\bin\\covenant-setup.exe"
+description = "Launch the Covenant Setup self-installed test payload"
+
+[purge]
+registry_branches = ["HKCU\\Software\\CovenantSetupSelfTest"]
+paths = ["{LocalAppData}\\CovenantSetupSelfTest"]

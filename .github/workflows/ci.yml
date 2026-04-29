@@ -1,0 +1,140 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "1"
+  DOTNET_NOLOGO: "1"
+
+jobs:
+  build:
+    name: Build (Rust + C# UI)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Visual Studio Build Tools (VC + Win11 SDK)
+        shell: pwsh
+        run: |
+          winget install --id Microsoft.VisualStudio.2022.BuildTools `
+            --override "--add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 --add Microsoft.VisualStudio.Component.Windows11SDK.22621 --passive --wait" `
+            --accept-package-agreements --accept-source-agreements --disable-interactivity
+
+      - name: Install Rust via Chocolatey
+        shell: pwsh
+        run: |
+          choco install rust-ms -y --no-progress
+          $rustBin = Join-Path $env:ProgramData 'chocolatey\lib\rust-ms\tools\rust-ms\bin'
+          if (Test-Path $rustBin) { Add-Content -Path $env:GITHUB_PATH -Value $rustBin }
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            10.x
+
+      - name: Restore C# UI projects
+        run: dotnet restore ui\Covenant.Setup.Ui\Covenant.Setup.Ui.csproj
+
+      - name: Cargo build (release)
+        run: cargo build --release --locked
+
+  rust-tests:
+    name: Rust unit tests
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Visual Studio Build Tools (VC + Win11 SDK)
+        shell: pwsh
+        run: |
+          winget install --id Microsoft.VisualStudio.2022.BuildTools `
+            --override "--add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 --add Microsoft.VisualStudio.Component.Windows11SDK.22621 --passive --wait" `
+            --accept-package-agreements --accept-source-agreements --disable-interactivity
+
+      - name: Install Rust via Chocolatey
+        shell: pwsh
+        run: |
+          choco install rust-ms -y --no-progress
+          $rustBin = Join-Path $env:ProgramData 'chocolatey\lib\rust-ms\tools\rust-ms\bin'
+          if (Test-Path $rustBin) { Add-Content -Path $env:GITHUB_PATH -Value $rustBin }
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            10.x
+
+      - name: Cargo test (including ignored / risky tests)
+        run: cargo test --locked -- --include-ignored
+
+  ui-tests:
+    name: C# UI unit tests
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            10.x
+
+      - name: Restore UI test project
+        run: dotnet restore ui\Covenant.Setup.Ui.Tests\Covenant.Setup.Ui.Tests.csproj
+
+      - name: Run UI tests
+        run: dotnet test ui\Covenant.Setup.Ui.Tests\Covenant.Setup.Ui.Tests.csproj --configuration Release --no-restore --logger "trx;LogFileName=ui-tests.trx"
+
+      - name: Upload UI test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-test-results
+          path: ui\Covenant.Setup.Ui.Tests\TestResults\*.trx
+          if-no-files-found: ignore
+
+  quality-gate:
+    name: Quality gate
+    runs-on: windows-latest
+    needs: [build, rust-tests, ui-tests]
+    if: always()
+    steps:
+      - name: Verify all required jobs succeeded
+        shell: pwsh
+        run: |
+          $results = @{
+            build       = '${{ needs.build.result }}'
+            rust_tests  = '${{ needs.rust-tests.result }}'
+            ui_tests    = '${{ needs.ui-tests.result }}'
+          }
+          $failed = $false
+          foreach ($entry in $results.GetEnumerator()) {
+            Write-Host ("{0,-12} : {1}" -f $entry.Key, $entry.Value)
+            if ($entry.Value -ne 'success') { $failed = $true }
+          }
+          if ($failed) {
+            Write-Error 'One or more required jobs did not succeed.'
+            exit 1
+          }
+          Write-Host 'All required jobs succeeded.'
