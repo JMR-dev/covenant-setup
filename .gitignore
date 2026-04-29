@@ -5,3 +5,5 @@
 /vm/self-test/payload/
 **/bin/
 **/obj/
+
+vm/

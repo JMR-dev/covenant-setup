@@ -25,7 +25,7 @@ internal static class Program
         Application.Run(new InstallerUiForm(pipeName));
     }
 
-    private static string? ReadPipeName(string[] args)
+    internal static string? ReadPipeName(string[] args)
     {
         for (var i = 0; i < args.Length - 1; i++)
         {
@@ -51,10 +51,12 @@ internal sealed class InstallerUiForm : Form
     private readonly Label _statusLabel;
     private readonly ProgressBar _progressBar;
     private readonly TextBox _logBox;
+    private readonly Button _saveErrataButton;
     private readonly Button _closeButton;
     private StreamWriter? _writer;
     private readonly object _writerLock = new();
     private bool _closeRequested;
+    private string? _errataJson;
 
     public InstallerUiForm(string pipeName)
     {
@@ -95,6 +97,17 @@ internal sealed class InstallerUiForm : Form
             Font = new Font("Consolas", 9F)
         };
 
+        _saveErrataButton = new Button
+        {
+            Text = "Save error data to local errata.json file?",
+            Enabled = false,
+            Visible = false,
+            Size = new Size(320, 28),
+            Location = new Point(ClientSize.Width - 432, ClientSize.Height - 40),
+            Anchor = AnchorStyles.Bottom | AnchorStyles.Right
+        };
+        _saveErrataButton.Click += (_, _) => SaveErrata();
+
         _closeButton = new Button
         {
             Text = "Close",
@@ -108,6 +121,7 @@ internal sealed class InstallerUiForm : Form
         Controls.Add(_statusLabel);
         Controls.Add(_progressBar);
         Controls.Add(_logBox);
+        Controls.Add(_saveErrataButton);
         Controls.Add(_closeButton);
 
         Shown += (_, _) => _ = Task.Run(RunPipeLoop);
@@ -215,6 +229,11 @@ internal sealed class InstallerUiForm : Form
                 });
                 return true;
 
+            case "fail":
+                UiTrace.Write("fail_message", new { message.AppName, message.Operation, message.Message, message.Error });
+                BeginInvokeSafe(() => ApplyFailure(message));
+                return true;
+
             case "prompt":
                 UiTrace.Write("prompt_show_requested", new { message.Id, message.Title, message.Buttons, message.Icon });
                 var result = ShowPrompt(message);
@@ -254,6 +273,74 @@ internal sealed class InstallerUiForm : Form
         _progressBar.Value = Math.Max(0, Math.Min(100, current * 100 / total));
     }
 
+    private void ApplyFailure(UiMessage message)
+    {
+        var operation = string.IsNullOrWhiteSpace(message.Operation) ? "complete" : message.Operation;
+        var appName = string.IsNullOrWhiteSpace(message.AppName) ? "unknown" : message.AppName;
+        var failureMessage = string.IsNullOrWhiteSpace(message.Message)
+            ? $"Error: program {appName} failed to {operation} completely!"
+            : message.Message;
+
+        _statusLabel.Text = failureMessage;
+        _progressBar.Value = 100;
+        AppendLog(failureMessage);
+        if (!string.IsNullOrWhiteSpace(message.Error))
+        {
+            AppendLog("Error details: " + message.Error);
+        }
+
+        _errataJson = BuildErrataJson(message);
+        _saveErrataButton.Enabled = !string.IsNullOrWhiteSpace(_errataJson);
+        _saveErrataButton.Visible = true;
+        _closeButton.Enabled = true;
+    }
+
+    private void SaveErrata()
+    {
+        if (string.IsNullOrWhiteSpace(_errataJson))
+        {
+            return;
+        }
+
+        try
+        {
+            var root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            if (string.IsNullOrWhiteSpace(root))
+            {
+                root = Environment.CurrentDirectory;
+            }
+
+            var directory = Path.Combine(root, "CovenantSetup");
+            Directory.CreateDirectory(directory);
+            var path = Path.Combine(directory, "errata.json");
+            File.WriteAllText(path, _errataJson, new UTF8Encoding(false));
+            AppendLog("Saved error data to " + path);
+            MessageBox.Show(this, "Error data saved to " + path, "covenant-setup", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+        catch (Exception ex)
+        {
+            UiTrace.Write("errata_save_error", new { ex.Message, ex.GetType().FullName, ex.StackTrace });
+            MessageBox.Show(this, "Unable to save errata.json: " + ex.Message, "covenant-setup", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    internal static string BuildErrataJson(UiMessage message)
+    {
+        if (message.Errata is JsonElement errata &&
+            errata.ValueKind is not JsonValueKind.Undefined and not JsonValueKind.Null)
+        {
+            return JsonSerializer.Serialize(errata, new JsonSerializerOptions { WriteIndented = true });
+        }
+
+        return JsonSerializer.Serialize(new
+        {
+            app_name = message.AppName,
+            operation = message.Operation,
+            message = message.Message,
+            error = message.Error
+        }, new JsonSerializerOptions { WriteIndented = true });
+    }
+
     private string ShowPrompt(UiMessage message)
     {
         if (InvokeRequired)
@@ -261,18 +348,8 @@ internal sealed class InstallerUiForm : Form
             return (string)Invoke(new Func<string>(() => ShowPrompt(message)));
         }
 
-        var buttons = message.Buttons switch
-        {
-            "ok_cancel" => MessageBoxButtons.OKCancel,
-            "yes_no" => MessageBoxButtons.YesNo,
-            _ => MessageBoxButtons.OK
-        };
-        var icon = message.Icon switch
-        {
-            "error" => MessageBoxIcon.Error,
-            "warning" => MessageBoxIcon.Warning,
-            _ => MessageBoxIcon.Information
-        };
+        var buttons = MapButtons(message.Buttons);
+        var icon = MapIcon(message.Icon);
 
         var result = MessageBox.Show(
             this,
@@ -282,15 +359,31 @@ internal sealed class InstallerUiForm : Form
             icon);
         UiTrace.Write("prompt_closed", new { message.Id, Result = result.ToString() });
 
-        return result switch
-        {
-            DialogResult.OK => "ok",
-            DialogResult.Cancel => "cancel",
-            DialogResult.Yes => "yes",
-            DialogResult.No => "no",
-            _ => "none"
-        };
+        return MapDialogResult(result);
     }
+
+    internal static MessageBoxButtons MapButtons(string? buttons) => buttons switch
+    {
+        "ok_cancel" => MessageBoxButtons.OKCancel,
+        "yes_no" => MessageBoxButtons.YesNo,
+        _ => MessageBoxButtons.OK
+    };
+
+    internal static MessageBoxIcon MapIcon(string? icon) => icon switch
+    {
+        "error" => MessageBoxIcon.Error,
+        "warning" => MessageBoxIcon.Warning,
+        _ => MessageBoxIcon.Information
+    };
+
+    internal static string MapDialogResult(DialogResult result) => result switch
+    {
+        DialogResult.OK => "ok",
+        DialogResult.Cancel => "cancel",
+        DialogResult.Yes => "yes",
+        DialogResult.No => "no",
+        _ => "none"
+    };
 
     private void WriteResponse(UiResponse response)
     {
@@ -333,7 +426,7 @@ internal sealed class InstallerUiForm : Form
         _logBox.ScrollToCaret();
     }
 
-    private static object SafeMessageSummary(string line)
+    internal static object SafeMessageSummary(string line)
     {
         try
         {
@@ -418,6 +511,18 @@ internal sealed class UiMessage
 
     [JsonPropertyName("message")]
     public string? Message { get; set; }
+
+    [JsonPropertyName("app_name")]
+    public string? AppName { get; set; }
+
+    [JsonPropertyName("operation")]
+    public string? Operation { get; set; }
+
+    [JsonPropertyName("error")]
+    public string? Error { get; set; }
+
+    [JsonPropertyName("errata")]
+    public JsonElement? Errata { get; set; }
 
     [JsonPropertyName("current_step")]
     public int? CurrentStep { get; set; }

@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(covenant_setup_embedded_ui)");
     publish_csharp_ui();
     embed_manifest(embed_manifest::new_manifest("Comctl32"))
         .expect("unable to embed application manifest");
@@ -39,15 +40,31 @@ fn publish_csharp_ui() {
         .arg("-p:DebugSymbols=false")
         .arg("-o")
         .arg(&publish_dir)
-        .status()
-        .expect("failed to launch dotnet publish for C# UI");
+        .status();
+    let status = match status {
+        Ok(status) => status,
+        Err(err) => {
+            println!(
+                "cargo:warning=C# UI helper was not bundled because dotnet publish could not start: {err}"
+            );
+            return;
+        }
+    };
     if !status.success() {
-        panic!("dotnet publish failed for C# UI with {status}");
+        println!(
+            "cargo:warning=C# UI helper was not bundled because dotnet publish failed with {status}"
+        );
+        return;
     }
 
     let ui_exe = publish_dir.join("Covenant.Setup.Ui.exe");
     if !ui_exe.exists() {
-        panic!("C# UI publish did not produce {}", ui_exe.display());
+        println!(
+            "cargo:warning=C# UI helper was not bundled because dotnet publish did not produce {}",
+            ui_exe.display()
+        );
+        return;
     }
+    println!("cargo:rustc-cfg=covenant_setup_embedded_ui");
     println!("cargo:rustc-env=COVENANT_SETUP_UI_EXE={}", ui_exe.display());
 }

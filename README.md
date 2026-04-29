@@ -46,15 +46,15 @@ Current output:
 
 That installer is a single executable. The manifest and payload files are embedded into the binary and extracted to a temporary working directory at runtime.
 
-The Rust build publishes a self-contained C# WinForms UI helper and embeds it into the Rust executable. Building the installer therefore requires the .NET SDK in addition to Rust/Cargo, but the packaged installer does not require a .NET runtime to be preinstalled on the target machine.
+When the .NET SDK is available, the Rust build publishes a self-contained C# WinForms UI helper and embeds it into the Rust executable. Without that helper the installer still builds, but `--headed` falls back to terminal progress.
 
 ## Install and Uninstall Model
 
 Direct engine commands:
 
 ```powershell
-cargo run -- install path\to\install.toml
-cargo run -- uninstall path\to\journal.json
+cargo run -- --headless install path\to\install.toml
+cargo run -- --headless uninstall path\to\journal.json
 ```
 
 Packaged installer behavior:
@@ -74,18 +74,15 @@ Installed-app uninstall behavior:
 
 ## UI Behavior
 
-There is now one installer/uninstaller path. UI mode is chosen by context unless explicitly overridden.
+There is now one installer/uninstaller path. UI mode must be explicit for interactive runs.
 
 Explicit flags:
 
 - `--headless`: force TUI
 - `--headed`: force GUI
+- `--json`: suppress UI and emit machine-readable events
 
-Current automatic behavior:
-
-- If launched from PowerShell / `pwsh`, uninstall prefers TUI
-- If launched from Windows GUI context, install/uninstall prefer GUI
-- Otherwise the engine can run without extra UI
+If `--headed` is requested but the C# UI helper is not bundled and no `Covenant.Setup.Ui.exe` sidecar exists next to the installer, the engine falls back to `--headless`.
 
 ### GUI
 
@@ -125,6 +122,7 @@ The sample manifest lives at [`examples/install.toml`](C:\Users\jasonross\worksp
 
 - Core engine flow is in [`src/main.rs`](C:\Users\jasonross\workspace\covenant-setup\src\main.rs)
 - Windows FFI wrappers are isolated in [`src/win.rs`](C:\Users\jasonross\workspace\covenant-setup\src\win.rs)
+- External-boundary calls (Win32, GUI prompts, reboot/cleanup spawning, embedded-bundle probe) flow through the `Sys` trait in [`src/sys.rs`](C:\Users\jasonross\workspace\covenant-setup\src\sys.rs); the production `WinSys` impl delegates to the real subsystems while `MockSys` records every call for unit tests
 - Journaling currently records declared actions through `DeclaredTracker`
 - The implementation is Windows-specific
 
@@ -156,12 +154,12 @@ Day-to-day work happens on Windows. This section documents an opt-in path for ty
 
 Prerequisites (Ubuntu 24.04 names):
 
-- `dotnet-sdk-10.0` — the C# UI build script (`build.rs`) invokes `dotnet publish`.
+- `dotnet-sdk-10.0` — optional for embedding the C# UI helper; without it, headed mode falls back to headless.
 - `mingw-w64` — provides the `x86_64-w64-mingw32-*` toolchain that the `windows-gnu` target links against.
 - `wine` — runs the resulting test binary. Already wired up via `runner = "wine"` in [`.cargo/config.toml`](.cargo/config.toml) for the `x86_64-pc-windows-gnu` target only.
 - `rustup target add x86_64-pc-windows-gnu`.
 
-The dotnet SDK needs `EnableWindowsTargeting=true` to cross-build a `net8.0-windows` project from Linux:
+The dotnet SDK needs `EnableWindowsTargeting=true` to cross-build a `net10.0-windows` project from Linux:
 
 ```bash
 EnableWindowsTargeting=true cargo check --target x86_64-pc-windows-gnu
@@ -207,4 +205,8 @@ Notes:
 - Set `COVENANT_HYPERV_SWITCH` to the Hyper-V virtual switch name you want Vagrant to use.
 - The harness writes its verification artifact to `dist\vagrant-self-test\guest-result.json`.
 - Use `-SkipViewer` if you do not want the harness to open the Hyper-V console window.
+
+### VM Coverage Harness
+
+In addition to the single-scenario smoke test, [`scripts/run-windows-vm-coverage.ps1`](C:\Users\jasonross\workspace\covenant-setup\scripts\run-windows-vm-coverage.ps1) walks every scenario manifest under `vm\<scenario>\install.toml` (`self-test`, `uac`, `hklm-registry`, `reboot`, `bundled-exec`) and delegates the in-guest assertions to [`scripts\windows-vm\coverage\<scenario>.ps1`](C:\Users\jasonross\workspace\covenant-setup\scripts\windows-vm\coverage). The scenarios exercise the elevation, MoveFileEx pending-rename / Restart Manager, HKLM-only registry, and bundled embedded-installer code paths that the unit tests stub out via `MockSys`.
 - Use `-HaltAfter` or `-DestroyAfter` if you want the harness to stop the VM after the test run.

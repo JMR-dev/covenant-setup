@@ -17,9 +17,6 @@ use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
     CoTaskMemFree, CoUninitialize, IPersistFile,
 };
-use windows::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
-};
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_SET_VALUE, KEY_WOW64_64KEY,
     REG_OPEN_CREATE_OPTIONS, REG_OPTION_NON_VOLATILE, REG_SAM_FLAGS, REG_SZ, REG_VALUE_TYPE,
@@ -28,7 +25,7 @@ use windows::Win32::System::Registry::{
 use windows::Win32::System::RestartManager::{
     RM_PROCESS_INFO, RmEndSession, RmGetList, RmRegisterResources, RmStartSession,
 };
-use windows::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId, OpenProcessToken};
+use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::UI::Shell::{
     FOLDERID_Desktop, FOLDERID_LocalAppData, FOLDERID_ProgramFilesX64, FOLDERID_ProgramFilesX86,
     FOLDERID_Windows, IShellLinkW, KNOWN_FOLDER_FLAG, SHGetKnownFolderPath, ShellExecuteW,
@@ -42,75 +39,6 @@ pub struct PathResolver {
     pub local_app_data: PathBuf,
     pub desktop: PathBuf,
     admin_roots: Vec<String>,
-}
-
-pub fn is_parent_powershell(logger: &Logger) -> Result<bool, AppError> {
-    let current_pid = unsafe { GetCurrentProcessId() };
-    logger.unsafe_enter("CreateToolhelp32Snapshot", json!({}));
-    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)? };
-    logger.unsafe_exit("CreateToolhelp32Snapshot", json!({"ok": true}));
-
-    let result = (|| -> Result<bool, AppError> {
-        let mut entry = PROCESSENTRY32W {
-            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
-            ..Default::default()
-        };
-        logger.unsafe_enter("Process32FirstW", json!({}));
-        let first = unsafe { Process32FirstW(snapshot, &mut entry) };
-        logger.unsafe_exit("Process32FirstW", json!({"ok": first.is_ok()}));
-        if first.is_err() {
-            return Ok(false);
-        }
-
-        let mut parent_pid = None;
-        loop {
-            if entry.th32ProcessID == current_pid {
-                parent_pid = Some(entry.th32ParentProcessID);
-                break;
-            }
-            logger.unsafe_enter("Process32NextW", json!({}));
-            let next = unsafe { Process32NextW(snapshot, &mut entry) };
-            logger.unsafe_exit("Process32NextW", json!({"ok": next.is_ok()}));
-            if next.is_err() {
-                break;
-            }
-        }
-
-        let Some(parent_pid) = parent_pid else {
-            return Ok(false);
-        };
-
-        let mut entry = PROCESSENTRY32W {
-            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
-            ..Default::default()
-        };
-        logger.unsafe_enter("Process32FirstW", json!({"search_parent": parent_pid}));
-        let first = unsafe { Process32FirstW(snapshot, &mut entry) };
-        logger.unsafe_exit("Process32FirstW", json!({"ok": first.is_ok()}));
-        if first.is_err() {
-            return Ok(false);
-        }
-
-        loop {
-            if entry.th32ProcessID == parent_pid {
-                let exe = wide_array_to_string(&entry.szExeFile);
-                let exe_lower = exe.to_ascii_lowercase();
-                return Ok(exe_lower.contains("powershell")
-                    || exe_lower == "pwsh.exe"
-                    || exe_lower == "pwsh");
-            }
-            logger.unsafe_enter("Process32NextW", json!({"search_parent": parent_pid}));
-            let next = unsafe { Process32NextW(snapshot, &mut entry) };
-            logger.unsafe_exit("Process32NextW", json!({"ok": next.is_ok()}));
-            if next.is_err() {
-                break;
-            }
-        }
-        Ok(false)
-    })();
-
-    close_handle(snapshot, logger)?;
-    result
 }
 
 impl PathResolver {
@@ -142,9 +70,9 @@ impl PathResolver {
 
     pub fn requires_admin(&self, path: &Path) -> bool {
         let candidate = normalize_for_admin_match(path);
-        self.admin_roots.iter().any(|root| {
-            candidate == *root || candidate.starts_with(&format!("{root}\\"))
-        })
+        self.admin_roots
+            .iter()
+            .any(|root| candidate == *root || candidate.starts_with(&format!("{root}\\")))
     }
 
     #[cfg(test)]
@@ -186,10 +114,7 @@ fn normalize_for_admin_match(path: &Path) -> String {
 // as `\"` and double any run of backslashes that immediately precedes a quote
 // or the closing quote.
 fn quote_command_line_arg(arg: &str) -> String {
-    let needs_quoting = arg.is_empty()
-        || arg
-            .chars()
-            .any(|c| c == ' ' || c == '\t' || c == '"');
+    let needs_quoting = arg.is_empty() || arg.chars().any(|c| c == ' ' || c == '\t' || c == '"');
     if !needs_quoting {
         return arg.to_string();
     }
@@ -590,14 +515,6 @@ fn pwstr_to_path(raw: PWSTR, logger: &Logger) -> Result<PathBuf, AppError> {
     }
 }
 
-fn wide_array_to_string(buffer: &[u16]) -> String {
-    let len = buffer
-        .iter()
-        .position(|value| *value == 0)
-        .unwrap_or(buffer.len());
-    String::from_utf16_lossy(&buffer[..len])
-}
-
 fn close_handle(handle: HANDLE, logger: &Logger) -> Result<(), AppError> {
     logger.unsafe_enter("CloseHandle", json!({}));
     let result = unsafe { CloseHandle(handle) };
@@ -673,6 +590,38 @@ impl Utf16Arg {
 mod tests {
     use super::*;
 
+    struct TestDir {
+        path: PathBuf,
+    }
+
+    impl TestDir {
+        fn new(name: &str) -> Self {
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "covenant-setup-win-test-{name}-{}-{unique}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn quiet_logger() -> Logger {
+        Logger {
+            json: false,
+            quiet: true,
+        }
+    }
+
     fn resolver() -> PathResolver {
         PathResolver::with_roots_for_test(vec![
             PathBuf::from("C:\\Program Files"),
@@ -740,9 +689,136 @@ mod tests {
     }
 
     #[test]
+    fn create_directory_recursive_creates_nested_directories_and_noops_existing() {
+        let temp = TestDir::new("create-dir");
+        let nested = temp.path.join("one").join("two").join("three");
+
+        create_directory_recursive(&nested, &quiet_logger()).unwrap();
+        create_directory_recursive(&nested, &quiet_logger()).unwrap();
+
+        assert!(nested.is_dir());
+    }
+
+    #[test]
+    fn copy_file_copies_bytes_to_destination() {
+        let temp = TestDir::new("copy-file");
+        let source = temp.path.join("source.bin");
+        let destination = temp.path.join("destination.bin");
+        fs::write(&source, b"copy me").unwrap();
+
+        copy_file(&source, &destination, &quiet_logger()).unwrap();
+
+        assert_eq!(fs::read(destination).unwrap(), b"copy me");
+    }
+
+    #[test]
+    fn remove_directory_if_exists_removes_empty_and_defers_nonempty() {
+        let temp = TestDir::new("remove-dir");
+        let empty = temp.path.join("empty");
+        let nonempty = temp.path.join("nonempty");
+        fs::create_dir_all(&empty).unwrap();
+        fs::create_dir_all(&nonempty).unwrap();
+        fs::write(nonempty.join("child.txt"), b"child").unwrap();
+
+        remove_directory_if_exists(&empty, &quiet_logger()).unwrap();
+        remove_directory_if_exists(&nonempty, &quiet_logger()).unwrap();
+        remove_directory_if_exists(&temp.path.join("missing"), &quiet_logger()).unwrap();
+
+        assert!(!empty.exists());
+        assert!(nonempty.is_dir());
+    }
+
+    #[test]
+    fn remove_file_with_fallback_deletes_existing_file_and_noops_missing() {
+        let temp = TestDir::new("remove-file");
+        let file = temp.path.join("payload.bin");
+        fs::write(&file, b"delete me").unwrap();
+
+        remove_file_with_fallback(&file, &quiet_logger()).unwrap();
+        remove_file_with_fallback(&file, &quiet_logger()).unwrap();
+
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn is_elevated_queries_current_process_token() {
+        let _ = is_elevated(&quiet_logger()).unwrap();
+    }
+
+    #[test]
+    fn delete_registry_tree_ignores_unique_missing_hkcu_key() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let subkey = format!(
+            "Software\\CovenantSetupTests\\missing-{}-{unique}",
+            std::process::id()
+        );
+
+        delete_registry_tree(RegistryRoot::Hkcu, &subkey, &quiet_logger()).unwrap();
+    }
+
+    #[test]
+    fn create_shortcut_writes_lnk_file_with_optional_fields() {
+        let temp = TestDir::new("shortcut");
+        let shortcut = temp.path.join("sample.lnk");
+        let target = std::env::current_exe().unwrap();
+        let working_directory = target.parent().unwrap();
+
+        create_shortcut(
+            &shortcut,
+            &target,
+            Some("--help"),
+            Some(working_directory),
+            Some("Sample shortcut"),
+            &quiet_logger(),
+        )
+        .unwrap();
+
+        assert!(shortcut.is_file());
+    }
+
+    #[test]
+    fn restart_manager_reports_locking_processes_for_unlocked_file() {
+        let temp = TestDir::new("restart-manager");
+        let file = temp.path.join("unlocked.txt");
+        fs::write(&file, b"unlocked").unwrap();
+
+        match get_locking_processes(&file, &quiet_logger()) {
+            Ok(pids) => assert!(pids.iter().all(|pid| *pid > 0)),
+            Err(err) => assert!(err.to_string().contains("RmStartSession failed")),
+        }
+    }
+
+    #[test]
+    fn pwstr_to_path_decodes_valid_utf16_and_rejects_invalid_utf16() {
+        let mut valid = Utf16Arg::from_str("C:\\Temp").inner;
+        let path = pwstr_to_path(PWSTR(valid.as_mut_ptr()), &quiet_logger()).unwrap();
+        assert_eq!(path, PathBuf::from("C:\\Temp"));
+
+        let mut invalid = vec![0xD800, 0];
+        let err = pwstr_to_path(PWSTR(invalid.as_mut_ptr()), &quiet_logger())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Invalid UTF-16"));
+    }
+
+    #[test]
+    fn win32_ok_accepts_success_and_formats_errors() {
+        win32_ok(ERROR_SUCCESS, "Example").unwrap();
+
+        let err = win32_ok(WIN32_ERROR(5), "Example").unwrap_err().to_string();
+        assert_eq!(err, "Example failed with Win32 error 5");
+    }
+
+    #[test]
     fn quote_passthrough_when_no_special_chars() {
         assert_eq!(quote_command_line_arg("install"), "install");
-        assert_eq!(quote_command_line_arg("C:\\Apps\\foo.exe"), "C:\\Apps\\foo.exe");
+        assert_eq!(
+            quote_command_line_arg("C:\\Apps\\foo.exe"),
+            "C:\\Apps\\foo.exe"
+        );
         assert_eq!(quote_command_line_arg("--json"), "--json");
     }
 
@@ -775,15 +851,9 @@ mod tests {
     #[test]
     fn quote_doubles_backslashes_only_when_followed_by_quote() {
         // \\ inside an unquoted-needing arg stays \\ when not before a quote.
-        assert_eq!(
-            quote_command_line_arg("a\\\\b c"),
-            "\"a\\\\b c\""
-        );
+        assert_eq!(quote_command_line_arg("a\\\\b c"), "\"a\\\\b c\"");
         // \\ immediately before a literal quote becomes \\\\\".
-        assert_eq!(
-            quote_command_line_arg("a\\\\\"b"),
-            "\"a\\\\\\\\\\\"b\""
-        );
+        assert_eq!(quote_command_line_arg("a\\\\\"b"), "\"a\\\\\\\\\\\"b\"");
     }
 
     #[test]
@@ -809,6 +879,17 @@ mod tests {
             let parsed = parse_argv_for_test(&quoted);
             assert_eq!(parsed, vec![input.to_string()], "input was {input:?}");
         }
+    }
+
+    #[test]
+    fn utf16_arg_as_bytes_includes_null_terminator() {
+        let arg = Utf16Arg::from_str("A");
+        assert_eq!(arg.inner, vec![65, 0]);
+        assert_eq!(
+            arg.as_bytes().len(),
+            arg.inner.len() * std::mem::size_of::<u16>()
+        );
+        assert_eq!(arg.as_bytes(), &[65, 0, 0, 0]);
     }
 
     // Reference parser following the CommandLineToArgvW algorithm, used only
