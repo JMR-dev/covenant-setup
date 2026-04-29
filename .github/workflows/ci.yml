@@ -35,8 +35,8 @@ jobs:
       - name: Install Rust via Chocolatey
         shell: pwsh
         run: |
-          choco install rust -y --no-progress
-          $rustBin = Join-Path $env:ProgramData 'chocolatey\lib\rust\tools\bin'
+          choco install rust-ms -y --no-progress
+          $rustBin = Join-Path $env:ProgramData 'chocolatey\lib\rust-ms\tools\rust-ms\bin'
           if (Test-Path $rustBin) { Add-Content -Path $env:GITHUB_PATH -Value $rustBin }
 
       - name: Cache cargo registry and target
@@ -71,8 +71,8 @@ jobs:
       - name: Install Rust via Chocolatey
         shell: pwsh
         run: |
-          choco install rust -y --no-progress
-          $rustBin = Join-Path $env:ProgramData 'chocolatey\lib\rust\tools\bin'
+          choco install rust-ms -y --no-progress
+          $rustBin = Join-Path $env:ProgramData 'chocolatey\lib\rust-ms\tools\rust-ms\bin'
           if (Test-Path $rustBin) { Add-Content -Path $env:GITHUB_PATH -Value $rustBin }
 
       - name: Cache cargo registry and target
