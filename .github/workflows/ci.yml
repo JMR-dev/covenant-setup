@@ -25,10 +25,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1"
+      - name: Install Visual Studio Build Tools (VC + Win11 SDK)
+        shell: pwsh
+        run: |
+          winget install --id Microsoft.VisualStudio.2022.BuildTools `
+            --override "--add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 --add Microsoft.VisualStudio.Component.Windows11SDK.22621 --passive --wait" `
+            --accept-package-agreements --accept-source-agreements --disable-interactivity
+
+      - name: Install Rust via Chocolatey
+        shell: pwsh
+        run: |
+          choco install rust -y --no-progress
+          $rustBin = Join-Path $env:ProgramData 'chocolatey\lib\rust\tools\bin'
+          if (Test-Path $rustBin) { Add-Content -Path $env:GITHUB_PATH -Value $rustBin }
 
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
@@ -52,10 +61,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1"
+      - name: Install Visual Studio Build Tools (VC + Win11 SDK)
+        shell: pwsh
+        run: |
+          winget install --id Microsoft.VisualStudio.2022.BuildTools `
+            --override "--add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 --add Microsoft.VisualStudio.Component.Windows11SDK.22621 --passive --wait" `
+            --accept-package-agreements --accept-source-agreements --disable-interactivity
+
+      - name: Install Rust via Chocolatey
+        shell: pwsh
+        run: |
+          choco install rust -y --no-progress
+          $rustBin = Join-Path $env:ProgramData 'chocolatey\lib\rust\tools\bin'
+          if (Test-Path $rustBin) { Add-Content -Path $env:GITHUB_PATH -Value $rustBin }
 
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
