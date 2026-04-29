@@ -9,8 +9,15 @@ public class ProgramTests
     [Fact]
     public void ReadPipeName_returns_value_following_pipe_flag()
     {
+        var name = Program.ReadPipeName(new[] { "--pipe", "foo" });
+        Assert.Equal("foo", name);
+    }
+
+    [Fact]
+    public void ReadPipeName_strips_full_pipe_path_prefix()
+    {
         var name = Program.ReadPipeName(new[] { "--pipe", @"\\.\pipe\foo" });
-        Assert.Equal(@"\\.\pipe\foo", name);
+        Assert.Equal("foo", name);
     }
 
     [Fact]

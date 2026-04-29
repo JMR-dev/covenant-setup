@@ -8,10 +8,10 @@ Windows has a mess when it comes to managing program lifecycles. Developers can 
 
 This packager aims to take a different approach by
 
-- Observing all the places a program installs to during installation and during any post-install scripts/operations and then writing a journal.json to the same directory the application installs to. This file is referenced during uninstall to return the machine back to the state it was before the install with any files and registry entries associated with that program.
+- Recording the install actions it applies (files, directories, registry entries, shortcuts, and script execution) into a `journal.json` written alongside the installed application. This journal is then used during uninstall to reverse those recorded actions and clean up associated state.
 - Take a "leave the campground better than you found it" approach - this Eagle Scout practices Leave No Trace.
-- Taking a "trust but verify model" to program installs and uninstalls, observing program behavior during install and uninstall in order to respect the user.
-- Using the `journal.json` as a manifest of everything the program did during the install and post install process.
+- Taking a "trust but verify model" to program installs and uninstalls by journaling engine-applied mutations and logging script execution in order to respect the user.
+- Using the `journal.json` as a manifest of the actions the installer performed during install and post-install processing.
 
 Its current shape is:
 
@@ -29,7 +29,7 @@ Its current shape is:
 - Creates an installed uninstaller executable in the app root
 - Uses a C# WinForms presentation process for GUI progress and prompts
 - Sends GUI state over named-pipe IPC from the Rust engine to the C# UI
-- Uses Win32 APIs through the `windows` crate with unsafe isolated in [`src/win.rs`](C:\Users\jasonross\workspace\covenant-setup\src\win.rs)
+- Uses Win32 APIs through the `windows` crate with unsafe isolated in [`src/win.rs`](src/win.rs)
 - Logs every unsafe boundary transition
 
 ## Packaging Model

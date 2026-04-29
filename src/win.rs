@@ -157,17 +157,18 @@ pub fn is_elevated(logger: &Logger) -> Result<bool, AppError> {
     let mut elevation = TOKEN_ELEVATION::default();
     let mut returned = 0u32;
     logger.unsafe_enter("GetTokenInformation", json!({"class":"TokenElevation"}));
-    unsafe {
+    let info_result = unsafe {
         GetTokenInformation(
             token,
             TokenElevation,
             Some((&mut elevation as *mut TOKEN_ELEVATION).cast::<c_void>()),
             std::mem::size_of::<TOKEN_ELEVATION>() as u32,
             &mut returned,
-        )?
+        )
     };
     logger.unsafe_exit("GetTokenInformation", json!({"returned": returned}));
     close_handle(token, logger)?;
+    info_result?;
     if returned < std::mem::size_of::<TOKEN_ELEVATION>() as u32 {
         return Err(AppError::Message("Short TOKEN_ELEVATION payload".into()));
     }
@@ -493,11 +494,11 @@ fn known_folder(id: &windows::core::GUID, logger: &Logger) -> Result<PathBuf, Ap
             "SHGetKnownFolderPath returned null".into(),
         ));
     }
-    let path = pwstr_to_path(raw, logger)?;
+    let path_result = pwstr_to_path(raw, logger);
     logger.unsafe_enter("CoTaskMemFree", json!({}));
     unsafe { CoTaskMemFree(Some(raw.0.cast())) };
     logger.unsafe_exit("CoTaskMemFree", json!({"ok":true}));
-    Ok(path)
+    path_result
 }
 
 fn pwstr_to_path(raw: PWSTR, logger: &Logger) -> Result<PathBuf, AppError> {

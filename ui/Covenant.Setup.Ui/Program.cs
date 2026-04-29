@@ -31,7 +31,13 @@ internal static class Program
         {
             if (string.Equals(args[i], "--pipe", StringComparison.OrdinalIgnoreCase))
             {
-                return args[i + 1];
+                var value = args[i + 1];
+                const string pipePrefix = @"\\.\pipe\";
+                if (value.StartsWith(pipePrefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    value = value[pipePrefix.Length..];
+                }
+                return value;
             }
         }
 

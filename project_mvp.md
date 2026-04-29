@@ -8,7 +8,7 @@
 ## MVP Requirements & Feature List
 
 ### 1. The Rust CLI Interface & IPC Readiness
-* **CLI Framework:** Utilize `clap` for robust argument parsing with standard subcommands (e.g., `glassbox install manifest.toml`, `glassbox uninstall journal.json`).
+* **CLI Framework:** Utilize `clap` for robust argument parsing with standard subcommands (e.g., `covenant-setup install manifest.toml`, `covenant-setup uninstall journal.json`).
 * **Structured Output Protocol:** The engine must accept a `--json` flag. When active, all standard text logs, progress percentages, and error stack traces must be suppressed and replaced with single-line serialized JSON objects emitted to `stdout`.
 * **UAC Handling:** The CLI must detect if it has administrative privileges via token inspection. If elevation is required for target paths, it must gracefully exit with a specific error code or auto-relaunch itself using the `runas` verb.
 
