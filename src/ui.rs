@@ -4,26 +4,27 @@ use serde_json::{Value, json};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::os::windows::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::process::{self, Child, Command};
 use std::thread;
 use std::time::{Duration, Instant};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const UI_EXE_NAME: &str = "Covenant.Setup.Ui.exe";
+const UI_BUNDLE_MAGIC: &[u8] = b"COVENANT_SETUP_UI_BUNDLE_V1\n";
 
 #[cfg(covenant_setup_embedded_ui)]
-fn embedded_ui_bytes() -> Option<&'static [u8]> {
-    Some(include_bytes!(env!("COVENANT_SETUP_UI_EXE")))
+fn embedded_ui_bundle_bytes() -> Option<&'static [u8]> {
+    Some(include_bytes!(env!("COVENANT_SETUP_UI_BUNDLE")))
 }
 
 #[cfg(not(covenant_setup_embedded_ui))]
-fn embedded_ui_bytes() -> Option<&'static [u8]> {
+fn embedded_ui_bundle_bytes() -> Option<&'static [u8]> {
     None
 }
 
 pub fn is_available() -> bool {
-    embedded_ui_bytes().is_some() || sidecar_ui_exe().is_some()
+    embedded_ui_bundle_bytes().is_some() || sidecar_ui_exe().is_some()
 }
 
 /// Trait abstraction over the live GUI progress IPC channel so install /
@@ -290,8 +291,7 @@ struct CSharpUiSession {
     child: Child,
     reader: BufReader<fs::File>,
     writer: fs::File,
-    exe_path: PathBuf,
-    remove_exe_on_drop: bool,
+    cleanup_root: Option<PathBuf>,
     closed: bool,
     child_exited: bool,
 }
@@ -300,8 +300,10 @@ impl CSharpUiSession {
     fn start() -> Result<Self, AppError> {
         let pipe_name = format!("covenant-setup-ui-{}-{}", process::id(), unique_suffix());
         crate::trace_event("ui_start", json!({"pipe_name": pipe_name}));
-        let prepared_exe = prepare_ui_exe()?;
-        let exe_path = prepared_exe.path;
+        let PreparedUiExe {
+            path: exe_path,
+            cleanup_root,
+        } = prepare_ui_exe()?;
         crate::trace_event("ui_extracted", json!({"exe_path": &exe_path}));
         let mut child = Command::new(&exe_path)
             .creation_flags(CREATE_NO_WINDOW)
@@ -320,8 +322,7 @@ impl CSharpUiSession {
             child,
             reader: BufReader::new(pipe),
             writer,
-            exe_path,
-            remove_exe_on_drop: prepared_exe.remove_on_drop,
+            cleanup_root,
             closed: false,
             child_exited: false,
         })
@@ -363,9 +364,7 @@ impl CSharpUiSession {
 impl Drop for CSharpUiSession {
     fn drop(&mut self) {
         if self.child_exited {
-            if self.remove_exe_on_drop {
-                let _ = fs::remove_file(&self.exe_path);
-            }
+            self.cleanup_ui_files();
             return;
         }
         if !self.closed {
@@ -376,9 +375,7 @@ impl Drop for CSharpUiSession {
         for _ in 0..20 {
             if self.child.try_wait().ok().flatten().is_some() {
                 crate::trace_event("ui_exited", json!({"pid": self.child.id()}));
-                if self.remove_exe_on_drop {
-                    let _ = fs::remove_file(&self.exe_path);
-                }
+                self.cleanup_ui_files();
                 return;
             }
             thread::sleep(Duration::from_millis(50));
@@ -386,8 +383,14 @@ impl Drop for CSharpUiSession {
         let _ = self.child.kill();
         let _ = self.child.wait();
         crate::trace_event("ui_killed", json!({"pid": self.child.id()}));
-        if self.remove_exe_on_drop {
-            let _ = fs::remove_file(&self.exe_path);
+        self.cleanup_ui_files();
+    }
+}
+
+impl CSharpUiSession {
+    fn cleanup_ui_files(&self) {
+        if let Some(root) = &self.cleanup_root {
+            let _ = fs::remove_dir_all(root);
         }
     }
 }
@@ -433,17 +436,17 @@ fn connect_pipe(pipe_path: &str, child: &mut Child) -> Result<fs::File, AppError
 
 struct PreparedUiExe {
     path: PathBuf,
-    remove_on_drop: bool,
+    cleanup_root: Option<PathBuf>,
 }
 
 fn prepare_ui_exe() -> Result<PreparedUiExe, AppError> {
-    if let Some(bytes) = embedded_ui_bytes() {
-        return extract_ui_exe(bytes);
+    if let Some(bytes) = embedded_ui_bundle_bytes() {
+        return extract_ui_bundle(bytes);
     }
     if let Some(path) = sidecar_ui_exe() {
         return Ok(PreparedUiExe {
             path,
-            remove_on_drop: false,
+            cleanup_root: None,
         });
     }
     Err(AppError::Message(format!(
@@ -451,24 +454,135 @@ fn prepare_ui_exe() -> Result<PreparedUiExe, AppError> {
     )))
 }
 
-fn extract_ui_exe(bytes: &[u8]) -> Result<PreparedUiExe, AppError> {
-    let root = std::env::temp_dir().join("covenant-setup-ui");
-    fs::create_dir_all(&root)?;
-    let path = root.join(format!(
-        "Covenant.Setup.Ui-{}-{}.exe",
+fn extract_ui_bundle(bytes: &[u8]) -> Result<PreparedUiExe, AppError> {
+    if !bytes.starts_with(UI_BUNDLE_MAGIC) {
+        return Err(AppError::Message("Embedded C# UI bundle is invalid".into()));
+    }
+
+    let root = std::env::temp_dir().join(format!(
+        "covenant-setup-ui-{}-{}",
         process::id(),
         unique_suffix()
     ));
-    fs::write(&path, bytes)?;
+    fs::create_dir_all(&root)?;
+    let mut cursor = UI_BUNDLE_MAGIC.len();
+
+    loop {
+        let path_len = read_bundle_u32(bytes, &mut cursor)? as usize;
+        let data_len = usize::try_from(read_bundle_u64(bytes, &mut cursor)?)
+            .map_err(|_| AppError::Message("Embedded C# UI file is too large".into()))?;
+        if path_len == 0 {
+            if data_len != 0 {
+                return Err(AppError::Message(
+                    "Embedded C# UI bundle has an invalid terminator".into(),
+                ));
+            }
+            break;
+        }
+
+        let path_end = checked_bundle_end(cursor, path_len)?;
+        if path_end > bytes.len() {
+            return Err(AppError::Message(
+                "Embedded C# UI bundle path exceeds bundle size".into(),
+            ));
+        }
+        let relative_path = std::str::from_utf8(&bytes[cursor..path_end]).map_err(|_| {
+            AppError::Message("Embedded C# UI bundle path is not valid UTF-8".into())
+        })?;
+        cursor = path_end;
+
+        let data_end = checked_bundle_end(cursor, data_len)?;
+        if data_end > bytes.len() {
+            return Err(AppError::Message(
+                "Embedded C# UI bundle file exceeds bundle size".into(),
+            ));
+        }
+
+        let output_path = bundle_output_path(&root, relative_path)?;
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(output_path, &bytes[cursor..data_end])?;
+        cursor = data_end;
+    }
+
+    let path = root.join(UI_EXE_NAME);
+    if !path.is_file() {
+        let _ = fs::remove_dir_all(&root);
+        return Err(AppError::Message(format!(
+            "Embedded C# UI bundle did not contain {UI_EXE_NAME}"
+        )));
+    }
+
     Ok(PreparedUiExe {
         path,
-        remove_on_drop: true,
+        cleanup_root: Some(root),
     })
 }
 
 fn sidecar_ui_exe() -> Option<PathBuf> {
     let path = std::env::current_exe().ok()?.parent()?.join(UI_EXE_NAME);
     path.is_file().then_some(path)
+}
+
+fn read_bundle_u32(bytes: &[u8], cursor: &mut usize) -> Result<u32, AppError> {
+    let end = checked_bundle_end(*cursor, std::mem::size_of::<u32>())?;
+    if end > bytes.len() {
+        return Err(AppError::Message(
+            "Embedded C# UI bundle ended unexpectedly".into(),
+        ));
+    }
+    let value = u32::from_le_bytes(
+        bytes[*cursor..end]
+            .try_into()
+            .map_err(|_| AppError::Message("Invalid embedded C# UI bundle u32".into()))?,
+    );
+    *cursor = end;
+    Ok(value)
+}
+
+fn read_bundle_u64(bytes: &[u8], cursor: &mut usize) -> Result<u64, AppError> {
+    let end = checked_bundle_end(*cursor, std::mem::size_of::<u64>())?;
+    if end > bytes.len() {
+        return Err(AppError::Message(
+            "Embedded C# UI bundle ended unexpectedly".into(),
+        ));
+    }
+    let value = u64::from_le_bytes(
+        bytes[*cursor..end]
+            .try_into()
+            .map_err(|_| AppError::Message("Invalid embedded C# UI bundle u64".into()))?,
+    );
+    *cursor = end;
+    Ok(value)
+}
+
+fn checked_bundle_end(start: usize, len: usize) -> Result<usize, AppError> {
+    start
+        .checked_add(len)
+        .ok_or_else(|| AppError::Message("Embedded C# UI bundle length overflow".into()))
+}
+
+fn bundle_output_path(root: &Path, relative_path: &str) -> Result<PathBuf, AppError> {
+    let relative_path = Path::new(relative_path);
+    if relative_path.is_absolute() {
+        return Err(AppError::Message(
+            "Embedded C# UI bundle contains an absolute path".into(),
+        ));
+    }
+
+    let mut output_path = root.to_path_buf();
+    for component in relative_path.components() {
+        match component {
+            Component::Normal(part) => output_path.push(part),
+            _ => {
+                return Err(AppError::Message(
+                    "Embedded C# UI bundle contains an unsafe path".into(),
+                ));
+            }
+        }
+    }
+    Ok(output_path)
 }
 
 fn message_summary(value: &Value) -> Value {
@@ -540,12 +654,21 @@ mod tests {
     }
 
     #[test]
-    fn extract_ui_exe_writes_temp_executable_and_marks_it_for_cleanup() {
-        let prepared = extract_ui_exe(b"fake exe").unwrap();
+    fn extract_ui_bundle_writes_temp_application_folder_and_marks_it_for_cleanup() {
+        let bundle = make_ui_bundle(&[
+            (UI_EXE_NAME, b"fake exe".as_slice()),
+            ("runtimes/win-x64/native/helper.dll", b"dll".as_slice()),
+        ]);
+        let prepared = extract_ui_bundle(&bundle).unwrap();
 
         assert_eq!(fs::read(&prepared.path).unwrap(), b"fake exe");
-        assert!(prepared.remove_on_drop);
-        fs::remove_file(prepared.path).unwrap();
+        let cleanup_root = prepared.cleanup_root.clone().unwrap();
+        assert!(
+            cleanup_root
+                .join("runtimes/win-x64/native/helper.dll")
+                .is_file()
+        );
+        fs::remove_dir_all(cleanup_root).unwrap();
     }
 
     #[test]
@@ -553,8 +676,8 @@ mod tests {
         match prepare_ui_exe() {
             Ok(prepared) => {
                 assert!(prepared.path.is_file());
-                if prepared.remove_on_drop {
-                    fs::remove_file(prepared.path).unwrap();
+                if let Some(cleanup_root) = prepared.cleanup_root {
+                    fs::remove_dir_all(cleanup_root).unwrap();
                 }
             }
             Err(err) => {
@@ -568,5 +691,19 @@ mod tests {
     fn availability_and_suffix_helpers_are_callable_without_side_effect_requirements() {
         let _ = is_available();
         assert!(unique_suffix() > 0);
+    }
+
+    fn make_ui_bundle(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut bundle = Vec::new();
+        bundle.extend_from_slice(UI_BUNDLE_MAGIC);
+        for (relative_path, data) in files {
+            bundle.extend_from_slice(&(relative_path.len() as u32).to_le_bytes());
+            bundle.extend_from_slice(&(data.len() as u64).to_le_bytes());
+            bundle.extend_from_slice(relative_path.as_bytes());
+            bundle.extend_from_slice(data);
+        }
+        bundle.extend_from_slice(&0u32.to_le_bytes());
+        bundle.extend_from_slice(&0u64.to_le_bytes());
+        bundle
     }
 }

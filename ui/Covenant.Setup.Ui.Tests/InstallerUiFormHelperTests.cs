@@ -4,7 +4,7 @@ using Xunit;
 
 namespace Covenant.Setup.Ui.Tests;
 
-public class InstallerUiFormHelperTests
+public class InstallerUiWindowHelperTests
 {
     [Fact]
     public void BuildErrataJson_uses_provided_errata_when_present()
@@ -19,7 +19,7 @@ public class InstallerUiFormHelperTests
             Errata = doc.RootElement.Clone()
         };
 
-        var json = InstallerUiForm.BuildErrataJson(msg);
+        var json = InstallerUiWindow.BuildErrataJson(msg);
 
         using var parsed = JsonDocument.Parse(json);
         Assert.Equal(JsonValueKind.Object, parsed.RootElement.ValueKind);
@@ -40,7 +40,7 @@ public class InstallerUiFormHelperTests
             Errata = null
         };
 
-        var json = InstallerUiForm.BuildErrataJson(msg);
+        var json = InstallerUiWindow.BuildErrataJson(msg);
 
         using var parsed = JsonDocument.Parse(json);
         Assert.Equal("MyApp", parsed.RootElement.GetProperty("app_name").GetString());
@@ -60,7 +60,7 @@ public class InstallerUiFormHelperTests
             Errata = doc.RootElement.Clone()
         };
 
-        var json = InstallerUiForm.BuildErrataJson(msg);
+        var json = InstallerUiWindow.BuildErrataJson(msg);
 
         using var parsed = JsonDocument.Parse(json);
         Assert.Equal("MyApp", parsed.RootElement.GetProperty("app_name").GetString());
@@ -72,7 +72,7 @@ public class InstallerUiFormHelperTests
     {
         const string line = """{"type":"progress","id":"x1","message":"Step 1","extra":"ignored"}""";
 
-        var summary = InstallerUiForm.SafeMessageSummary(line);
+        var summary = InstallerUiWindow.SafeMessageSummary(line);
         var json = JsonSerializer.Serialize(summary);
 
         using var parsed = JsonDocument.Parse(json);
@@ -84,7 +84,7 @@ public class InstallerUiFormHelperTests
     [Fact]
     public void SafeMessageSummary_returns_raw_length_for_invalid_json()
     {
-        var summary = InstallerUiForm.SafeMessageSummary("not-json-at-all");
+        var summary = InstallerUiWindow.SafeMessageSummary("not-json-at-all");
         var json = JsonSerializer.Serialize(summary);
 
         using var parsed = JsonDocument.Parse(json);
@@ -95,7 +95,7 @@ public class InstallerUiFormHelperTests
     [Fact]
     public void SafeMessageSummary_returns_null_fields_when_known_keys_absent()
     {
-        var summary = InstallerUiForm.SafeMessageSummary("{}");
+        var summary = InstallerUiWindow.SafeMessageSummary("{}");
         var json = JsonSerializer.Serialize(summary);
 
         using var parsed = JsonDocument.Parse(json);
@@ -105,38 +105,42 @@ public class InstallerUiFormHelperTests
     }
 
     [Theory]
-    [InlineData("ok_cancel", MessageBoxButtons.OKCancel)]
-    [InlineData("yes_no", MessageBoxButtons.YesNo)]
-    [InlineData("ok", MessageBoxButtons.OK)]
-    [InlineData(null, MessageBoxButtons.OK)]
-    [InlineData("unknown", MessageBoxButtons.OK)]
-    public void MapButtons_handles_known_and_default_values(string? input, MessageBoxButtons expected)
+    [InlineData("ok_cancel", 1)]
+    [InlineData("yes_no", 2)]
+    [InlineData("ok", 0)]
+    [InlineData(null, 0)]
+    [InlineData("unknown", 0)]
+    public void MapButtons_handles_known_and_default_values(string? input, int expected)
     {
-        Assert.Equal(expected, InstallerUiForm.MapButtons(input));
+        Assert.Equal((PromptButtonSet)expected, InstallerUiWindow.MapButtons(input));
     }
 
     [Theory]
-    [InlineData("error", MessageBoxIcon.Error)]
-    [InlineData("warning", MessageBoxIcon.Warning)]
-    [InlineData("information", MessageBoxIcon.Information)]
-    [InlineData(null, MessageBoxIcon.Information)]
-    [InlineData("anything-else", MessageBoxIcon.Information)]
-    public void MapIcon_handles_known_and_default_values(string? input, MessageBoxIcon expected)
+    [InlineData("error", 2)]
+    [InlineData("warning", 1)]
+    [InlineData("information", 0)]
+    [InlineData(null, 0)]
+    [InlineData("anything-else", 0)]
+    public void MapIcon_handles_known_and_default_values(string? input, int expected)
     {
-        Assert.Equal(expected, InstallerUiForm.MapIcon(input));
+        Assert.Equal((PromptIconKind)expected, InstallerUiWindow.MapIcon(input));
     }
 
     [Theory]
-    [InlineData(DialogResult.OK, "ok")]
-    [InlineData(DialogResult.Cancel, "cancel")]
-    [InlineData(DialogResult.Yes, "yes")]
-    [InlineData(DialogResult.No, "no")]
-    [InlineData(DialogResult.None, "none")]
-    [InlineData(DialogResult.Abort, "none")]
-    [InlineData(DialogResult.Retry, "none")]
-    [InlineData(DialogResult.Ignore, "none")]
-    public void MapDialogResult_maps_to_lowercase_token(DialogResult input, string expected)
+    [InlineData(0, 0, "ok")]
+    [InlineData(2, 0, "ok")]
+    [InlineData(0, 1, "ok")]
+    [InlineData(2, 1, "cancel")]
+    [InlineData(0, 2, "yes")]
+    [InlineData(1, 2, "no")]
+    [InlineData(2, 2, "none")]
+    public void MapDialogResult_maps_to_lowercase_token(
+        int input,
+        int buttons,
+        string expected)
     {
-        Assert.Equal(expected, InstallerUiForm.MapDialogResult(input));
+        Assert.Equal(
+            expected,
+            InstallerUiWindow.MapDialogResult((PromptDialogResult)input, (PromptButtonSet)buttons));
     }
 }
