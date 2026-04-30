@@ -8,6 +8,12 @@ Run from the repository root:
 dotnet run --project .\authoring-ui\Covenant.Setup.Authoring.csproj
 ```
 
+Run unit tests from the repository root:
+
+```powershell
+dotnet test .\authoring-ui.Tests\Covenant.Setup.Authoring.Tests.csproj
+```
+
 The app edits the current manifest schema:
 
 - `app_name`

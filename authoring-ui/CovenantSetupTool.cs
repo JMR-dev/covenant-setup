@@ -15,7 +15,12 @@ internal static class CovenantSetupToolLocator
 {
     public static CovenantSetupTool? Find()
     {
-        foreach (var candidate in CandidatePaths())
+        return Find(CandidateDirectories());
+    }
+
+    internal static CovenantSetupTool? Find(IEnumerable<string> candidateDirectories)
+    {
+        foreach (var candidate in CandidatePaths(candidateDirectories))
         {
             if (File.Exists(candidate))
             {
@@ -26,10 +31,10 @@ internal static class CovenantSetupToolLocator
         return null;
     }
 
-    private static IEnumerable<string> CandidatePaths()
+    private static IEnumerable<string> CandidatePaths(IEnumerable<string> candidateDirectories)
     {
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var directory in CandidateDirectories())
+        foreach (var directory in candidateDirectories)
         {
             var candidate = System.IO.Path.Combine(directory, "covenant-setup.exe");
             if (seen.Add(candidate))
@@ -91,22 +96,9 @@ internal static class CovenantSetupPackager
         var error = new StringBuilder();
         using var process = new Process
         {
-            StartInfo = new ProcessStartInfo
-            {
-                FileName = tool.Path,
-                WorkingDirectory = System.IO.Path.GetDirectoryName(manifestPath) ?? Environment.CurrentDirectory,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true
-            },
+            StartInfo = CreateStartInfo(tool, manifestPath, outputDirectory),
             EnableRaisingEvents = true
         };
-        process.StartInfo.ArgumentList.Add("--json");
-        process.StartInfo.ArgumentList.Add("package");
-        process.StartInfo.ArgumentList.Add(manifestPath);
-        process.StartInfo.ArgumentList.Add("--output");
-        process.StartInfo.ArgumentList.Add(outputDirectory);
 
         process.OutputDataReceived += (_, args) =>
         {
@@ -132,5 +124,30 @@ internal static class CovenantSetupPackager
             process.ExitCode,
             output.ToString().Trim(),
             error.ToString().Trim());
+    }
+
+    internal static ProcessStartInfo CreateStartInfo(
+        CovenantSetupTool tool,
+        string manifestPath,
+        string outputDirectory)
+    {
+        var manifestDirectory = System.IO.Path.GetDirectoryName(manifestPath);
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = tool.Path,
+            WorkingDirectory = string.IsNullOrWhiteSpace(manifestDirectory)
+                ? Environment.CurrentDirectory
+                : manifestDirectory,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        startInfo.ArgumentList.Add("--json");
+        startInfo.ArgumentList.Add("package");
+        startInfo.ArgumentList.Add(manifestPath);
+        startInfo.ArgumentList.Add("--output");
+        startInfo.ArgumentList.Add(outputDirectory);
+        return startInfo;
     }
 }

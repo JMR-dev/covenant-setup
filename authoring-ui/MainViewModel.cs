@@ -18,9 +18,16 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
     private string _tomlPreview = string.Empty;
     private string _validationSummary = string.Empty;
     private bool _hasValidationErrors;
+    private readonly Func<CovenantSetupTool?> _locateCovenantSetupTool;
 
     public MainViewModel()
+        : this(CovenantSetupToolLocator.Find)
     {
+    }
+
+    internal MainViewModel(Func<CovenantSetupTool?> locateCovenantSetupTool)
+    {
+        _locateCovenantSetupTool = locateCovenantSetupTool;
         Directories.CollectionChanged += CollectionChanged;
         Files.CollectionChanged += CollectionChanged;
         Registry.CollectionChanged += CollectionChanged;
@@ -170,7 +177,7 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
 
     public void RefreshCovenantSetupTool()
     {
-        CovenantSetupTool = CovenantSetupToolLocator.Find();
+        CovenantSetupTool = _locateCovenantSetupTool();
         CovenantSetupStatus = CovenantSetupTool is null
             ? "covenant-setup.exe was not found. Packaging is disabled."
             : "Packaging enabled: " + CovenantSetupTool.Path;
