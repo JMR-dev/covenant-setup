@@ -18,6 +18,8 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
     private string _tomlPreview = string.Empty;
     private string _validationSummary = string.Empty;
     private bool _hasValidationErrors;
+    private bool _suppressPreviewRefresh;
+    private SuggestedManifestEntries _suggestedEntries = SuggestedManifestEntries.Empty;
     private readonly Func<CovenantSetupTool?> _locateCovenantSetupTool;
 
     public MainViewModel()
@@ -131,30 +133,52 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
 
     public void ApplyDefaults(bool resetCollections)
     {
-        if (resetCollections)
+        _suppressPreviewRefresh = true;
+        try
         {
-            Directories.Clear();
-            Files.Clear();
-            Registry.Clear();
-            Shortcuts.Clear();
-            Scripts.Clear();
-            PurgePaths.Clear();
-            PurgeRegistryBranches.Clear();
+            if (resetCollections)
+            {
+                Directories.Clear();
+                Files.Clear();
+                Registry.Clear();
+                Shortcuts.Clear();
+                Scripts.Clear();
+                PurgePaths.Clear();
+                PurgeRegistryBranches.Clear();
+            }
+            else
+            {
+                RemoveSuggestedEntries(_suggestedEntries);
+            }
+
+            var suggestedEntries = BuildSuggestedEntries();
+            AddSuggestedEntries(suggestedEntries);
+            _suggestedEntries = suggestedEntries;
+        }
+        finally
+        {
+            _suppressPreviewRefresh = false;
         }
 
+        RefreshPreview();
+    }
+
+    private SuggestedManifestEntries BuildSuggestedEntries()
+    {
         var folder = string.IsNullOrWhiteSpace(ApplicationFolder)
             ? SanitizeIdentifier(AppName)
             : SanitizeIdentifier(ApplicationFolder);
-        ApplicationFolder = folder;
+        SetProperty(ref _applicationFolder, folder, nameof(ApplicationFolder), refreshPreview: false);
 
         var root = InstallRootToken.TrimEnd('\\') + "\\" + folder;
-        AddUnique(Directories, new DirectorySpec(root));
-        AddUnique(Directories, new DirectorySpec(root + @"\bin"));
-        AddUnique(PurgePaths, root);
-
         var registryBranch = @"HKCU\Software\" + folder;
-        AddUnique(PurgeRegistryBranches, registryBranch);
-        AddUnique(Registry, new RegistrySpec(registryBranch, "InstallRoot", root));
+        var directories = new List<DirectorySpec>
+        {
+            new(root),
+            new(root + @"\bin")
+        };
+        var files = new List<FileSpec>();
+        var shortcuts = new List<ShortcutSpec>();
 
         if (!string.IsNullOrWhiteSpace(PrimaryPayload))
         {
@@ -162,8 +186,8 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
             if (!string.IsNullOrWhiteSpace(fileName))
             {
                 var destination = root + @"\bin\" + fileName;
-                AddUnique(Files, new FileSpec(PrimaryPayload.Trim(), destination));
-                AddUnique(Shortcuts, new ShortcutSpec(
+                files.Add(new FileSpec(PrimaryPayload.Trim(), destination));
+                shortcuts.Add(new ShortcutSpec(
                     @"{Desktop}\" + AppName.Trim() + ".lnk",
                     destination,
                     null,
@@ -172,7 +196,13 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
             }
         }
 
-        RefreshPreview();
+        return new SuggestedManifestEntries(
+            directories,
+            files,
+            [new RegistrySpec(registryBranch, "InstallRoot", root)],
+            shortcuts,
+            [root],
+            [registryBranch]);
     }
 
     public void RefreshCovenantSetupTool()
@@ -351,7 +381,30 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
 
     private void CollectionChanged(object? sender, NotifyCollectionChangedEventArgs args)
     {
-        RefreshPreview();
+        if (!_suppressPreviewRefresh)
+        {
+            RefreshPreview();
+        }
+    }
+
+    private void AddSuggestedEntries(SuggestedManifestEntries entries)
+    {
+        AddRangeUnique(Directories, entries.Directories);
+        AddRangeUnique(Files, entries.Files);
+        AddRangeUnique(Registry, entries.Registry);
+        AddRangeUnique(Shortcuts, entries.Shortcuts);
+        AddRangeUnique(PurgePaths, entries.PurgePaths);
+        AddRangeUnique(PurgeRegistryBranches, entries.PurgeRegistryBranches);
+    }
+
+    private void RemoveSuggestedEntries(SuggestedManifestEntries entries)
+    {
+        RemoveRange(Directories, entries.Directories);
+        RemoveRange(Files, entries.Files);
+        RemoveRange(Registry, entries.Registry);
+        RemoveRange(Shortcuts, entries.Shortcuts);
+        RemoveRange(PurgePaths, entries.PurgePaths);
+        RemoveRange(PurgeRegistryBranches, entries.PurgeRegistryBranches);
     }
 
     private static void AddTrimmed<T>(
@@ -370,6 +423,22 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
         if (!collection.Contains(item))
         {
             collection.Add(item);
+        }
+    }
+
+    private static void AddRangeUnique<T>(ObservableCollection<T> collection, IEnumerable<T> items)
+    {
+        foreach (var item in items)
+        {
+            AddUnique(collection, item);
+        }
+    }
+
+    private static void RemoveRange<T>(ICollection<T> collection, IEnumerable<T> items)
+    {
+        foreach (var item in items)
+        {
+            collection.Remove(item);
         }
     }
 
@@ -394,4 +463,15 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
 
     [GeneratedRegex(@"[^A-Za-z0-9_-]+")]
     private static partial Regex IdentifierRegex();
+
+    private sealed record SuggestedManifestEntries(
+        IReadOnlyList<DirectorySpec> Directories,
+        IReadOnlyList<FileSpec> Files,
+        IReadOnlyList<RegistrySpec> Registry,
+        IReadOnlyList<ShortcutSpec> Shortcuts,
+        IReadOnlyList<string> PurgePaths,
+        IReadOnlyList<string> PurgeRegistryBranches)
+    {
+        public static SuggestedManifestEntries Empty { get; } = new([], [], [], [], [], []);
+    }
 }

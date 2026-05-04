@@ -49,6 +49,32 @@ public class MainViewModelTests
     }
 
     [Fact]
+    public void ApplyDefaults_replaces_previous_suggested_entries_without_removing_manual_entries()
+    {
+        var viewModel = new MainViewModel(() => null);
+        viewModel.AddDirectory(@"{LocalAppData}\Manual");
+        viewModel.AddFile(@"payload\manual.dll", @"{LocalAppData}\Manual\manual.dll");
+        viewModel.AddPurgePath(@"{LocalAppData}\Manual");
+
+        viewModel.AppName = "Renamed App";
+        viewModel.ApplicationFolder = "RenamedApp";
+        viewModel.PrimaryPayload = @"payload\renamed.exe";
+        viewModel.ApplyDefaults(resetCollections: false);
+
+        Assert.DoesNotContain(viewModel.Directories, directory => directory.Path == @"{LocalAppData}\CovenantSetupSample");
+        Assert.DoesNotContain(viewModel.Files, file => file.Source == @"payload\sample_app.cmd");
+        Assert.DoesNotContain(viewModel.PurgePaths, path => path == @"{LocalAppData}\CovenantSetupSample");
+        Assert.Contains(viewModel.Directories, directory => directory.Path == @"{LocalAppData}\RenamedApp");
+        Assert.Contains(viewModel.Files, file => file.Source == @"payload\renamed.exe");
+        Assert.Contains(viewModel.PurgePaths, path => path == @"{LocalAppData}\RenamedApp");
+        Assert.Contains(viewModel.Directories, directory => directory.Path == @"{LocalAppData}\Manual");
+        Assert.Contains(viewModel.Files, file => file.Source == @"payload\manual.dll");
+        Assert.Contains(viewModel.PurgePaths, path => path == @"{LocalAppData}\Manual");
+        Assert.DoesNotContain("CovenantSetupSample", viewModel.TomlPreview, StringComparison.Ordinal);
+        Assert.DoesNotContain("Covenant-Setup Sample App", viewModel.TomlPreview, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Packaging_is_disabled_when_covenant_setup_is_missing()
     {
         var viewModel = new MainViewModel(() => null);
