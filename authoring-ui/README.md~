@@ -28,18 +28,6 @@ The published app entry point is:
 
 Keep the full `dist\authoring-ui` folder together when copying it to another Windows machine. The release output includes the WinUI, Windows App SDK, and .NET runtime files required by the app.
 
-Build the Inno Setup installer from the repository root:
-
-```powershell
-iscc .\authoring-ui\Covenant.Setup.Authoring.iss
-```
-
-The installer output is:
-
-```powershell
-.\dist\inno\covenant-setup-authoring-installer.exe
-```
-
 The app edits the current manifest schema:
 
 - `app_name`

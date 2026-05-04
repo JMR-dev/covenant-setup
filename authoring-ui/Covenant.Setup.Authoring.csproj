@@ -7,13 +7,15 @@
     <WindowsAppSDKSelfContained Condition="'$(RuntimeIdentifier)' != ''">true</WindowsAppSDKSelfContained>
     <WindowsAppSdkBootstrapInitialize>false</WindowsAppSdkBootstrapInitialize>
     <WindowsAppSdkDeploymentManagerInitialize>false</WindowsAppSdkDeploymentManagerInitialize>
-    <WindowsAppSdkUndockedRegFreeWinRTInitialize>false</WindowsAppSdkUndockedRegFreeWinRTInitialize>
+    <WindowsAppSdkUndockedRegFreeWinRTInitialize Condition="'$(RuntimeIdentifier)' != ''">true</WindowsAppSdkUndockedRegFreeWinRTInitialize>
+    <WindowsAppSdkUndockedRegFreeWinRTInitialize Condition="'$(RuntimeIdentifier)' == ''">false</WindowsAppSdkUndockedRegFreeWinRTInitialize>
     <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>Covenant.Setup.Authoring</AssemblyName>
     <RootNamespace>Covenant.Setup.Authoring</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.0.1" />
@@ -21,4 +23,7 @@
   <ItemGroup>
     <InternalsVisibleTo Include="Covenant.Setup.Authoring.Tests" />
   </ItemGroup>
+  <Target Name="CopyWinUIPriToPublishDirectory" AfterTargets="Publish" Condition="'$(PublishDir)' != '' and Exists('$(OutDir)$(AssemblyName).pri')">
+    <Copy SourceFiles="$(OutDir)$(AssemblyName).pri" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" />
+  </Target>
 </Project>

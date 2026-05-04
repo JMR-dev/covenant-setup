@@ -8,6 +8,7 @@ internal static class Program
     [STAThread]
     private static void Main()
     {
+        WinRT.ComWrappersSupport.InitializeComWrappers();
         Application.Start(_params =>
         {
             var dispatcherQueue = DispatcherQueue.GetForCurrentThread();
@@ -22,9 +23,14 @@ internal static class Program
     }
 }
 
-internal sealed class AuthoringApp : Application
+partial class AuthoringApp : Application
 {
     private Window? _window;
+
+    public AuthoringApp()
+    {
+        InitializeComponent();
+    }
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
