@@ -1,4 +1,4 @@
-using System.Collections;
+using System.Collections.ObjectModel;
 using Microsoft.UI;
 using Microsoft.UI.Text;
 using Microsoft.UI.Windowing;
@@ -6,6 +6,8 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Data;
 using Microsoft.UI.Xaml.Media;
+using Windows.UI;
+using Windows.UI.ViewManagement;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Graphics;
 using Windows.Storage;
@@ -17,19 +19,27 @@ namespace Covenant.Setup.Authoring;
 internal sealed class MainWindow : Window
 {
     private readonly MainViewModel _viewModel = new();
+    private readonly List<Border> _sectionBorders = [];
+    private readonly List<Border> _rowBorders = [];
+    private readonly List<TextBlock> _secondaryTextBlocks = [];
     private TextBlock _statusText = null!;
     private TextBlock _toolStatusText = null!;
     private TextBox _previewBox = null!;
     private TextBox _outputDirectoryBox = null!;
     private Button _chooseOutputButton = null!;
     private Button _generateInstallerButton = null!;
+    private Grid _rootGrid = null!;
+    private ToggleSwitch _themeToggle = null!;
     private string? _lastSavedManifestPath;
     private bool _isPackaging;
+    private bool _syncingThemeToggle;
+    private bool _usingSystemTheme;
 
     public MainWindow()
     {
         Title = "Covenant Setup Manifest Authoring";
         Content = BuildContent();
+        ApplyInitialTheme();
         ConfigureWindow();
         _viewModel.PropertyChanged += (_, args) =>
         {
@@ -53,15 +63,16 @@ internal sealed class MainWindow : Window
     {
         var root = new Grid
         {
-            Padding = new Thickness(16),
-            RowSpacing = 12,
-            ColumnSpacing = 16,
+            Padding = new Thickness(8),
+            RowSpacing = 8,
+            ColumnSpacing = 8,
             DataContext = _viewModel
         };
+        _rootGrid = root;
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(520) });
+        root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(480) });
         root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
         var header = BuildHeader();
@@ -112,11 +123,16 @@ internal sealed class MainWindow : Window
             FontSize = 22,
             FontWeight = FontWeights.SemiBold
         });
-        titleStack.Children.Add(new TextBlock
-        {
-            Text = "Create install.toml for covenant-setup",
-            Foreground = new SolidColorBrush(Colors.DimGray)
-        });
+        var subtitle = new TextBlock();
+        _secondaryTextBlocks.Add(subtitle);
+        subtitle.SetBinding(
+            TextBlock.TextProperty,
+            new Binding
+            {
+                Path = new PropertyPath(nameof(MainViewModel.ManifestSubtitle)),
+                Mode = BindingMode.OneWay
+            });
+        titleStack.Children.Add(subtitle);
         Grid.SetColumn(titleStack, 0);
         header.Children.Add(titleStack);
 
@@ -126,6 +142,15 @@ internal sealed class MainWindow : Window
             HorizontalAlignment = HorizontalAlignment.Right,
             Spacing = 8
         };
+
+        _themeToggle = new ToggleSwitch
+        {
+            OnContent = "Dark",
+            OffContent = "Light",
+            MinWidth = 96
+        };
+        _themeToggle.Toggled += (_, _) => ToggleTheme();
+        actions.Children.Add(_themeToggle);
 
         var validateButton = new Button { Content = "Validate", MinWidth = 92 };
         validateButton.Click += async (_, _) => await ShowValidationAsync();
@@ -211,7 +236,7 @@ internal sealed class MainWindow : Window
     private FrameworkElement BuildAppSection()
     {
         var appNameBox = BoundTextBox(nameof(MainViewModel.AppName), "App name");
-        var folderBox = BoundTextBox(nameof(MainViewModel.ApplicationFolder), "Application folder");
+        var folderBox = BoundTextBox(nameof(MainViewModel.ApplicationFolder), "Application target installation folder");
         var payloadBox = BoundTextBox(nameof(MainViewModel.PrimaryPayload), @"payload\app.exe");
 
         var rootCombo = new ComboBox
@@ -228,21 +253,13 @@ internal sealed class MainWindow : Window
             }
         };
 
-        var defaultsButton = new Button
-        {
-            Content = "Apply Suggested Entries",
-            HorizontalAlignment = HorizontalAlignment.Left
-        };
-        defaultsButton.Click += (_, _) => _viewModel.ApplyDefaults(resetCollections: false);
-
         return Section(
             "App",
             Labeled("Name", appNameBox),
             TwoColumn(
                 Labeled("Install Root", rootCombo),
-                Labeled("Folder", folderBox)),
-            Labeled("Primary Payload", payloadBox),
-            defaultsButton);
+                Labeled("Application Target Installation Folder", folderBox)),
+            Labeled("Primary Payload", payloadBox));
     }
 
     private FrameworkElement BuildPackageSection()
@@ -301,8 +318,8 @@ internal sealed class MainWindow : Window
     private FrameworkElement BuildDirectoriesSection()
     {
         var pathBox = new TextBox { PlaceholderText = @"{LocalAppData}\Vendor\App" };
-        var list = List(_viewModel.Directories, 104);
-        var addButton = new Button { Content = "Add", MinWidth = 72 };
+        var rows = RemovableRows(_viewModel.Directories);
+        var addButton = new Button { Content = "Add Path", MinWidth = 88 };
         addButton.Click += (_, _) =>
         {
             _viewModel.AddDirectory(pathBox.Text);
@@ -310,17 +327,16 @@ internal sealed class MainWindow : Window
         };
 
         return Section(
-            "Directories",
+            "Directory Paths",
             InputRow(pathBox, addButton),
-            list,
-            RemoveButton(list, _viewModel.Directories));
+            rows);
     }
 
     private FrameworkElement BuildFilesSection()
     {
         var sourceBox = new TextBox { PlaceholderText = @"payload\app.exe" };
         var destinationBox = new TextBox { PlaceholderText = @"{LocalAppData}\Vendor\App\bin\app.exe" };
-        var list = List(_viewModel.Files, 120);
+        var rows = RemovableRows(_viewModel.Files);
         var addButton = new Button { Content = "Add", MinWidth = 72 };
         addButton.Click += async (_, _) =>
         {
@@ -339,8 +355,7 @@ internal sealed class MainWindow : Window
             "Files",
             TwoColumn(Labeled("Source", sourceBox), Labeled("Destination", destinationBox)),
             AlignRight(addButton),
-            list,
-            RemoveButton(list, _viewModel.Files));
+            rows);
     }
 
     private FrameworkElement BuildRegistrySection()
@@ -348,7 +363,7 @@ internal sealed class MainWindow : Window
         var keyBox = new TextBox { PlaceholderText = @"HKCU\Software\VendorApp" };
         var nameBox = new TextBox { PlaceholderText = "InstallRoot" };
         var valueBox = new TextBox { PlaceholderText = @"{LocalAppData}\Vendor\App" };
-        var list = List(_viewModel.Registry, 120);
+        var rows = RemovableRows(_viewModel.Registry);
         var addButton = new Button { Content = "Add", MinWidth = 72 };
         addButton.Click += async (_, _) =>
         {
@@ -371,18 +386,17 @@ internal sealed class MainWindow : Window
             Labeled("Key", keyBox),
             TwoColumn(Labeled("Name", nameBox), Labeled("Value", valueBox)),
             AlignRight(addButton),
-            list,
-            RemoveButton(list, _viewModel.Registry));
+            rows);
     }
 
     private FrameworkElement BuildShortcutsSection()
     {
-        var pathBox = new TextBox { PlaceholderText = @"{Desktop}\Vendor App.lnk" };
+        var pathBox = new TextBox { PlaceholderText = @"{Desktop}\VendorApp.lnk" };
         var targetBox = new TextBox { PlaceholderText = @"{LocalAppData}\Vendor\App\bin\app.exe" };
         var argumentsBox = new TextBox { PlaceholderText = "--optional" };
         var workingDirectoryBox = new TextBox { PlaceholderText = @"{LocalAppData}\Vendor\App" };
         var descriptionBox = new TextBox { PlaceholderText = "Launch application" };
-        var list = List(_viewModel.Shortcuts, 120);
+        var rows = RemovableRows(_viewModel.Shortcuts);
         var addButton = new Button { Content = "Add", MinWidth = 72 };
         addButton.Click += async (_, _) =>
         {
@@ -411,8 +425,7 @@ internal sealed class MainWindow : Window
             TwoColumn(Labeled("Arguments", argumentsBox), Labeled("Working Directory", workingDirectoryBox)),
             Labeled("Description", descriptionBox),
             AlignRight(addButton),
-            list,
-            RemoveButton(list, _viewModel.Shortcuts));
+            rows);
     }
 
     private FrameworkElement BuildScriptsSection()
@@ -425,7 +438,7 @@ internal sealed class MainWindow : Window
             PlaceholderText = "-ExecutionPolicy"
         };
         var workingDirectoryBox = new TextBox { PlaceholderText = @"{LocalAppData}\Vendor\App" };
-        var list = List(_viewModel.Scripts, 112);
+        var rows = RemovableRows(_viewModel.Scripts);
         var addButton = new Button { Content = "Add", MinWidth = 72 };
         addButton.Click += async (_, _) =>
         {
@@ -450,16 +463,15 @@ internal sealed class MainWindow : Window
             Labeled("Arguments", argsBox),
             Labeled("Working Directory", workingDirectoryBox),
             AlignRight(addButton),
-            list,
-            RemoveButton(list, _viewModel.Scripts));
+            rows);
     }
 
     private FrameworkElement BuildPurgeSection()
     {
         var pathBox = new TextBox { PlaceholderText = @"{LocalAppData}\Vendor\App" };
         var branchBox = new TextBox { PlaceholderText = @"HKCU\Software\VendorApp" };
-        var pathList = List(_viewModel.PurgePaths, 88);
-        var branchList = List(_viewModel.PurgeRegistryBranches, 88);
+        var pathRows = RemovableRows(_viewModel.PurgePaths);
+        var branchRows = RemovableRows(_viewModel.PurgeRegistryBranches);
 
         var addPathButton = new Button { Content = "Add Path", MinWidth = 96 };
         addPathButton.Click += (_, _) =>
@@ -478,11 +490,9 @@ internal sealed class MainWindow : Window
         return Section(
             "Purge",
             Labeled("Path", InputRow(pathBox, addPathButton)),
-            pathList,
-            RemoveButton(pathList, _viewModel.PurgePaths),
+            pathRows,
             Labeled("Registry Branch", InputRow(branchBox, addBranchButton)),
-            branchList,
-            RemoveButton(branchList, _viewModel.PurgeRegistryBranches));
+            branchRows);
     }
 
     private async Task SaveManifestAsync()
@@ -503,6 +513,12 @@ internal sealed class MainWindow : Window
             return null;
         }
 
+        if (!string.IsNullOrWhiteSpace(_lastSavedManifestPath) &&
+            !_viewModel.IsExpectedManifestPath(_lastSavedManifestPath))
+        {
+            _lastSavedManifestPath = null;
+        }
+
         if (!string.IsNullOrWhiteSpace(_lastSavedManifestPath))
         {
             await File.WriteAllTextAsync(_lastSavedManifestPath, _viewModel.TomlPreview);
@@ -517,11 +533,21 @@ internal sealed class MainWindow : Window
         InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
         picker.SuggestedStartLocation = PickerLocationId.DocumentsLibrary;
         picker.FileTypeChoices.Add("TOML manifest", [".toml"]);
-        picker.SuggestedFileName = "install";
+        picker.SuggestedFileName = _viewModel.ExpectedManifestFileName;
 
         var file = await picker.PickSaveFileAsync();
         if (file is null)
         {
+            return null;
+        }
+
+        if (!_viewModel.IsExpectedManifestPath(file.Path))
+        {
+            await ShowNoticeAsync(
+                "Manifest File Name",
+                MainViewModel.ContainsWhitespace(file.Path)
+                    ? "The manifest path cannot contain spaces. Save the manifest as " + _viewModel.ExpectedManifestFileName + " in a folder path without spaces."
+                    : "Save the manifest as " + _viewModel.ExpectedManifestFileName + ".");
             return null;
         }
 
@@ -662,6 +688,63 @@ internal sealed class MainWindow : Window
         appWindow.MoveAndResize(new RectInt32(x, y, width, height));
     }
 
+    private void ApplyInitialTheme()
+    {
+        var savedTheme = AuthoringPreferences.LoadTheme();
+        var osTheme = savedTheme is null ? DetectOsTheme() : null;
+        var initialTheme = savedTheme ?? osTheme ?? ElementTheme.Dark;
+        _usingSystemTheme = savedTheme is null && osTheme is not null;
+        _rootGrid.RequestedTheme = _usingSystemTheme ? ElementTheme.Default : initialTheme;
+        SetThemeToggle(initialTheme == ElementTheme.Dark);
+
+        _rootGrid.Loaded += (_, _) =>
+        {
+            if (_usingSystemTheme)
+            {
+                SetThemeToggle(EffectiveTheme() == ElementTheme.Dark);
+            }
+
+            ApplyThemeBrushes();
+        };
+        _rootGrid.ActualThemeChanged += (_, _) =>
+        {
+            if (_usingSystemTheme)
+            {
+                SetThemeToggle(EffectiveTheme() == ElementTheme.Dark);
+            }
+
+            ApplyThemeBrushes();
+        };
+        ApplyThemeBrushes();
+    }
+
+    private void ToggleTheme()
+    {
+        if (_syncingThemeToggle)
+        {
+            return;
+        }
+
+        var theme = _themeToggle.IsOn ? ElementTheme.Dark : ElementTheme.Light;
+        _usingSystemTheme = false;
+        _rootGrid.RequestedTheme = theme;
+        AuthoringPreferences.SaveTheme(theme);
+        ApplyThemeBrushes();
+    }
+
+    private void SetThemeToggle(bool isDark)
+    {
+        _syncingThemeToggle = true;
+        try
+        {
+            _themeToggle.IsOn = isDark;
+        }
+        finally
+        {
+            _syncingThemeToggle = false;
+        }
+    }
+
     private void RefreshStatusBrush()
     {
         if (_statusText is null)
@@ -669,8 +752,10 @@ internal sealed class MainWindow : Window
             return;
         }
 
-        _statusText.Foreground = new SolidColorBrush(
-            _viewModel.HasValidationErrors ? Colors.Firebrick : Colors.DarkGreen);
+        var brushes = CreateThemeBrushes();
+        _statusText.Foreground = _viewModel.HasValidationErrors
+            ? brushes.ErrorText
+            : brushes.SuccessText;
     }
 
     private void RefreshPackageControls()
@@ -685,9 +770,117 @@ internal sealed class MainWindow : Window
         _chooseOutputButton.IsEnabled = toolAvailable;
         _generateInstallerButton.IsEnabled = _viewModel.CanPackage && !_isPackaging;
         _generateInstallerButton.Content = _isPackaging ? "Generating..." : "Generate Installer EXE";
-        _toolStatusText.Foreground = new SolidColorBrush(
-            _viewModel.HasCovenantSetupTool ? Colors.DarkGreen : Colors.Firebrick);
+        var brushes = CreateThemeBrushes();
+        _toolStatusText.Foreground = _viewModel.HasCovenantSetupTool
+            ? brushes.SuccessText
+            : brushes.ErrorText;
     }
+
+    private void ApplyThemeBrushes()
+    {
+        if (_rootGrid is null)
+        {
+            return;
+        }
+
+        var brushes = CreateThemeBrushes();
+        _rootGrid.Background = brushes.PageBackground;
+
+        foreach (var border in _sectionBorders)
+        {
+            border.Background = brushes.SurfaceBackground;
+            border.BorderBrush = brushes.Border;
+        }
+
+        foreach (var border in _rowBorders)
+        {
+            border.Background = brushes.RowBackground;
+            border.BorderBrush = brushes.Border;
+        }
+
+        foreach (var textBlock in _secondaryTextBlocks)
+        {
+            textBlock.Foreground = brushes.SecondaryText;
+        }
+
+        if (_previewBox is not null)
+        {
+            _previewBox.Background = brushes.PreviewBackground;
+            _previewBox.Foreground = brushes.PreviewText;
+            _previewBox.BorderBrush = brushes.Border;
+        }
+
+        RefreshStatusBrush();
+        RefreshPackageStatusBrush();
+    }
+
+    private void RefreshPackageStatusBrush()
+    {
+        if (_toolStatusText is null)
+        {
+            return;
+        }
+
+        var brushes = CreateThemeBrushes();
+        _toolStatusText.Foreground = _viewModel.HasCovenantSetupTool
+            ? brushes.SuccessText
+            : brushes.ErrorText;
+    }
+
+    private ElementTheme EffectiveTheme()
+    {
+        if (_rootGrid.RequestedTheme is ElementTheme.Dark or ElementTheme.Light)
+        {
+            return _rootGrid.RequestedTheme;
+        }
+
+        if (_rootGrid.ActualTheme is ElementTheme.Dark or ElementTheme.Light)
+        {
+            return _rootGrid.ActualTheme;
+        }
+
+        return DetectOsTheme() ?? ElementTheme.Dark;
+    }
+
+    private static ElementTheme? DetectOsTheme()
+    {
+        try
+        {
+            var background = new UISettings().GetColorValue(UIColorType.Background);
+            var luminance = (0.2126 * background.R) + (0.7152 * background.G) + (0.0722 * background.B);
+            return luminance < 128 ? ElementTheme.Dark : ElementTheme.Light;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private ThemeBrushes CreateThemeBrushes() =>
+        EffectiveTheme() == ElementTheme.Dark
+            ? new ThemeBrushes(
+                Brush(27, 26, 25),
+                Brush(37, 36, 35),
+                Brush(46, 45, 43),
+                Brush(90, 88, 86),
+                Brush(200, 198, 196),
+                Brush(17, 17, 17),
+                Brush(243, 242, 241),
+                Brush(108, 203, 127),
+                Brush(255, 138, 138))
+            : new ThemeBrushes(
+                Brush(246, 246, 244),
+                Brush(255, 255, 255),
+                Brush(250, 250, 248),
+                Brush(208, 208, 208),
+                Brush(98, 98, 98),
+                Brush(255, 255, 255),
+                Brush(26, 26, 26),
+                Brush(16, 124, 16),
+                Brush(196, 43, 28));
+
+    private static SolidColorBrush Brush(byte red, byte green, byte blue) =>
+        new(Color.FromArgb(255, red, green, blue));
 
     private static TextBox BoundTextBox(string propertyName, string placeholder)
     {
@@ -703,9 +896,9 @@ internal sealed class MainWindow : Window
         return box;
     }
 
-    private static FrameworkElement Section(string title, params UIElement[] children)
+    private FrameworkElement Section(string title, params UIElement[] children)
     {
-        var stack = new StackPanel { Spacing = 8 };
+        var stack = new StackPanel { Spacing = 6 };
         stack.Children.Add(new TextBlock
         {
             Text = title,
@@ -718,19 +911,21 @@ internal sealed class MainWindow : Window
             stack.Children.Add(child);
         }
 
-        return new Border
+        var border = new Border
         {
-            BorderBrush = new SolidColorBrush(Colors.Gainsboro),
             BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(6),
-            Padding = new Thickness(12),
+            Padding = new Thickness(8),
             Child = stack
         };
+        _sectionBorders.Add(border);
+        ApplyThemeBrushes();
+        return border;
     }
 
     private static FrameworkElement Labeled(string label, FrameworkElement control)
     {
-        var stack = new StackPanel { Spacing = 4 };
+        var stack = new StackPanel { Spacing = 2 };
         stack.Children.Add(new TextBlock
         {
             Text = label,
@@ -743,7 +938,7 @@ internal sealed class MainWindow : Window
 
     private static Grid TwoColumn(FrameworkElement left, FrameworkElement right)
     {
-        var grid = new Grid { ColumnSpacing = 8 };
+        var grid = new Grid { ColumnSpacing = 6 };
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         Grid.SetColumn(left, 0);
@@ -755,7 +950,7 @@ internal sealed class MainWindow : Window
 
     private static Grid InputRow(TextBox textBox, Button button)
     {
-        var grid = new Grid { ColumnSpacing = 8 };
+        var grid = new Grid { ColumnSpacing = 6 };
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         Grid.SetColumn(textBox, 0);
@@ -771,32 +966,85 @@ internal sealed class MainWindow : Window
         return button;
     }
 
-    private static ListView List(IEnumerable source, double height) => new()
+    private FrameworkElement RemovableRows<T>(ObservableCollection<T> collection)
     {
-        ItemsSource = source,
-        Height = height,
-        SelectionMode = ListViewSelectionMode.Single
-    };
+        var rows = new StackPanel { Spacing = 4 };
 
-    private static Button RemoveButton<T>(ListView list, ICollection<T> collection)
-    {
-        var button = new Button
+        void RenderRows()
         {
-            Content = "Remove Selected",
-            HorizontalAlignment = HorizontalAlignment.Right
-        };
-        button.Click += (_, _) =>
-        {
-            if (list.SelectedItem is T item)
+            foreach (var border in rows.Children.OfType<Border>())
             {
-                collection.Remove(item);
+                _rowBorders.Remove(border);
             }
+
+            rows.Children.Clear();
+            foreach (var item in collection.ToArray())
+            {
+                var value = item;
+                rows.Children.Add(RemovableRow(Convert.ToString(value) ?? string.Empty, () => collection.Remove(value)));
+            }
+
+            rows.Visibility = collection.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
+        }
+
+        collection.CollectionChanged += (_, _) => RenderRows();
+        RenderRows();
+        return rows;
+    }
+
+    private FrameworkElement RemovableRow(string text, Action remove)
+    {
+        var grid = new Grid { ColumnSpacing = 8 };
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+        var label = new TextBlock
+        {
+            Text = text,
+            TextWrapping = TextWrapping.Wrap,
+            VerticalAlignment = VerticalAlignment.Center
         };
-        return button;
+        Grid.SetColumn(label, 0);
+        grid.Children.Add(label);
+
+        var removeButton = new Button
+        {
+            Content = "x",
+            MinWidth = 28,
+            Width = 28,
+            Height = 28,
+            Padding = new Thickness(0),
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        removeButton.Click += (_, _) => remove();
+        Grid.SetColumn(removeButton, 1);
+        grid.Children.Add(removeButton);
+
+        var border = new Border
+        {
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(4),
+            Padding = new Thickness(6),
+            Child = grid
+        };
+        _rowBorders.Add(border);
+        ApplyThemeBrushes();
+        return border;
     }
 
     private static IReadOnlyList<string> SplitLines(string value) =>
         value.Split(
             [Environment.NewLine, "\n"],
             StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    private sealed record ThemeBrushes(
+        SolidColorBrush PageBackground,
+        SolidColorBrush SurfaceBackground,
+        SolidColorBrush RowBackground,
+        SolidColorBrush Border,
+        SolidColorBrush SecondaryText,
+        SolidColorBrush PreviewBackground,
+        SolidColorBrush PreviewText,
+        SolidColorBrush SuccessText,
+        SolidColorBrush ErrorText);
 }

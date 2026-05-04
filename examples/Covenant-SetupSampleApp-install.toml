@@ -1,0 +1,35 @@
+app_name = 'Covenant-Setup Sample App'
+
+[directories]
+paths = [
+  '{LocalAppData}\CovenantSetupSample',
+  '{LocalAppData}\CovenantSetupSample\bin'
+]
+
+[[files]]
+source = 'payload\sample_app.cmd'
+destination = '{LocalAppData}\CovenantSetupSample\bin\sample_app.cmd'
+
+[[registry]]
+key = 'HKCU\Software\CovenantSetupSample'
+name = 'InstallRoot'
+value = '{LocalAppData}\CovenantSetupSample'
+
+[[shortcuts]]
+path = '{Desktop}\CovenantSetupSample.lnk'
+target = '{LocalAppData}\CovenantSetupSample\bin\sample_app.cmd'
+description = 'Launch the Covenant-Setup sample payload'
+
+[[scripts]]
+command = 'powershell'
+args = [
+  '-ExecutionPolicy',
+  'Bypass',
+  '-File',
+  'payload\post_install.ps1'
+]
+working_directory = '{LocalAppData}\CovenantSetupSample'
+
+[purge]
+registry_branches = ['HKCU\Software\CovenantSetupSample']
+paths = ['{LocalAppData}\CovenantSetupSample']

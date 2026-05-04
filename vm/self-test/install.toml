@@ -1,10 +1,10 @@
 app_name = "Covenant Setup Self Test"
 
-[[directories]]
-path = "{LocalAppData}\\CovenantSetupSelfTest"
-
-[[directories]]
-path = "{LocalAppData}\\CovenantSetupSelfTest\\bin"
+[directories]
+paths = [
+  "{LocalAppData}\\CovenantSetupSelfTest",
+  "{LocalAppData}\\CovenantSetupSelfTest\\bin",
+]
 
 [[files]]
 source = "payload\\covenant-setup.exe"
@@ -16,7 +16,7 @@ name = "InstallRoot"
 value = "{LocalAppData}\\CovenantSetupSelfTest"
 
 [[shortcuts]]
-path = "{Desktop}\\Covenant Setup Self Test.lnk"
+path = "{Desktop}\\CovenantSetupSelfTest.lnk"
 target = "{LocalAppData}\\CovenantSetupSelfTest\\bin\\covenant-setup.exe"
 description = "Launch the Covenant Setup self-installed test payload"
 

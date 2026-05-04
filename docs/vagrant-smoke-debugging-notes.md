@@ -264,7 +264,7 @@ The smoke harness now does this inside the guest:
    - `%LOCALAPPDATA%\CovenantSetupSelfTest\journal.json`
    - `%LOCALAPPDATA%\CovenantSetupSelfTest\covenant-setup-uninstall.exe`
    - `HKCU:\Software\CovenantSetupSelfTest`
-   - `Desktop\Covenant Setup Self Test.lnk`
+   - `Desktop\CovenantSetupSelfTest.lnk`
 
 4. Schedules an interactive uninstall task.
 5. Runs the installed uninstaller with:

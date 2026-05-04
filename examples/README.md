@@ -5,7 +5,7 @@ This example stays in `HKCU` and `{LocalAppData}` so it can be exercised without
 Build single-file installers:
 
 ```powershell
-cargo run -- package examples/install.toml --output dist
+cargo run -- package examples/Covenant-SetupSampleApp-install.toml --output dist
 ```
 
 This emits:
@@ -18,13 +18,13 @@ It chooses GUI or TUI mode from context, or you can force one explicitly with `-
 Run install:
 
 ```powershell
-cargo run -- install examples/install.toml --json
+cargo run -- install examples/Covenant-SetupSampleApp-install.toml --json
 ```
 
 Write the journal somewhere explicit:
 
 ```powershell
-cargo run -- install examples/install.toml --journal examples/journal.json
+cargo run -- install examples/Covenant-SetupSampleApp-install.toml --journal examples/journal.json
 ```
 
 Run uninstall:

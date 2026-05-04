@@ -38,13 +38,13 @@ public class CovenantSetupToolTests
     public void CreateStartInfo_builds_expected_package_command()
     {
         var tool = new CovenantSetupTool(@"C:\tools\covenant-setup.exe");
-        var manifest = @"C:\src\sample app\install.toml";
+        var manifest = @"C:\src\sampleapp\SampleApp-install.toml";
         var output = @"C:\out dir";
 
         var startInfo = CovenantSetupPackager.CreateStartInfo(tool, manifest, output);
 
         Assert.Equal(tool.Path, startInfo.FileName);
-        Assert.Equal(@"C:\src\sample app", startInfo.WorkingDirectory);
+        Assert.Equal(@"C:\src\sampleapp", startInfo.WorkingDirectory);
         Assert.False(startInfo.UseShellExecute);
         Assert.True(startInfo.CreateNoWindow);
         Assert.True(startInfo.RedirectStandardOutput);

@@ -13,7 +13,8 @@ public class ManifestTomlWriterTests
             AppName = "Sample App",
             Directories =
             [
-                new DirectorySpec(@"{LocalAppData}\Sample")
+                @"{LocalAppData}\Sample",
+                @"{LocalAppData}\Sample\bin"
             ],
             Files =
             [
@@ -26,9 +27,9 @@ public class ManifestTomlWriterTests
             Shortcuts =
             [
                 new ShortcutSpec(
-                    @"{Desktop}\Sample App.lnk",
+                    @"{Desktop}\SampleApp.lnk",
                     @"{LocalAppData}\Sample\bin\app.exe",
-                    "--profile default",
+                    "--profile=default",
                     @"{LocalAppData}\Sample",
                     "Launch Sample App")
             ],
@@ -49,59 +50,63 @@ public class ManifestTomlWriterTests
         var toml = Normalize(ManifestTomlWriter.Write(document));
 
         const string expected = """
-app_name = "Sample App"
+app_name = 'Sample App'
 
-[[directories]]
-path = "{LocalAppData}\\Sample"
+[directories]
+paths = [
+  '{LocalAppData}\Sample',
+  '{LocalAppData}\Sample\bin'
+]
 
 [[files]]
-source = "payload\\app.exe"
-destination = "{LocalAppData}\\Sample\\bin\\app.exe"
+source = 'payload\app.exe'
+destination = '{LocalAppData}\Sample\bin\app.exe'
 
 [[registry]]
-key = "HKCU\\Software\\Sample"
-name = "InstallRoot"
-value = "{LocalAppData}\\Sample"
+key = 'HKCU\Software\Sample'
+name = 'InstallRoot'
+value = '{LocalAppData}\Sample'
 
 [[shortcuts]]
-path = "{Desktop}\\Sample App.lnk"
-target = "{LocalAppData}\\Sample\\bin\\app.exe"
-arguments = "--profile default"
-working_directory = "{LocalAppData}\\Sample"
-description = "Launch Sample App"
+path = '{Desktop}\SampleApp.lnk'
+target = '{LocalAppData}\Sample\bin\app.exe'
+arguments = '--profile=default'
+working_directory = '{LocalAppData}\Sample'
+description = 'Launch Sample App'
 
 [[scripts]]
-command = "powershell"
+command = 'powershell'
 args = [
-  "-ExecutionPolicy",
-  "Bypass",
-  "-File",
-  "payload\\post_install.ps1"
+  '-ExecutionPolicy',
+  'Bypass',
+  '-File',
+  'payload\post_install.ps1'
 ]
-working_directory = "{LocalAppData}\\Sample"
+working_directory = '{LocalAppData}\Sample'
 
 [purge]
-registry_branches = ["HKCU\\Software\\Sample"]
-paths = ["{LocalAppData}\\Sample"]
+registry_branches = ['HKCU\Software\Sample']
+paths = ['{LocalAppData}\Sample']
 
 """;
         Assert.Equal(Normalize(expected), toml);
     }
 
     [Fact]
-    public void Write_escapes_toml_strings()
+    public void Write_uses_literal_strings_when_possible_and_escapes_when_required()
     {
         var document = new ManifestDocument
         {
             AppName = "Quoted \"App\"\nTabbed\tPath",
-            Directories = [new DirectorySpec(@"C:\Apps\Sample")],
+            Directories = [@"C:\Apps\Sample"],
             Purge = new PurgeSpec()
         };
 
         var toml = Normalize(ManifestTomlWriter.Write(document));
 
         Assert.Contains("app_name = \"Quoted \\\"App\\\"\\nTabbed\\tPath\"", toml);
-        Assert.Contains("path = \"C:\\\\Apps\\\\Sample\"", toml);
+        Assert.Contains(@"'C:\Apps\Sample'", toml);
+        Assert.DoesNotContain(@"C:\\Apps\\Sample", toml, StringComparison.Ordinal);
     }
 
     private static string Normalize(string value) => value.Replace("\r\n", "\n");

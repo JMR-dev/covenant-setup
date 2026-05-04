@@ -297,7 +297,7 @@ function Wait-ForUninstallCleanup {
 }
 
 $installRoot = Join-Path $env:LOCALAPPDATA "CovenantSetupSelfTest"
-$shortcutPath = Join-Path ([Environment]::GetFolderPath("Desktop")) "Covenant Setup Self Test.lnk"
+$shortcutPath = Join-Path ([Environment]::GetFolderPath("Desktop")) "CovenantSetupSelfTest.lnk"
 $registryPath = "HKCU:\Software\CovenantSetupSelfTest"
 $journalPath = Join-Path $installRoot "journal.json"
 $installedExe = Join-Path $installRoot "bin\covenant-setup.exe"

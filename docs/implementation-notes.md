@@ -144,7 +144,7 @@ fn manifest_requires_admin(
     resolver: &win::PathResolver,
 ) -> Result<bool, AppError> {
     let mut paths = Vec::new();
-    paths.extend(manifest.directories.iter().map(|d| &d.path));
+    paths.extend(manifest.directories.iter());
     paths.extend(manifest.files.iter().map(|f| &f.destination));
     paths.extend(manifest.shortcuts.iter().map(|s| &s.path));
     if paths.iter().any(|p| resolver.requires_admin(&resolver.resolve(p))) {

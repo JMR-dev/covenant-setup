@@ -15,7 +15,7 @@ This packager aims to take a different approach by
 
 Its current shape is:
 
-- a packager that takes a developer-authored `install.toml`
+- a packager that takes a developer-authored `${AppName}-install.toml` path with no spaces
 - a single-file installer runtime with the app payload embedded into the `.exe`
 - an installed uninstaller path that reuses the same Rust engine
 
@@ -37,7 +37,7 @@ Its current shape is:
 The packager command is:
 
 ```powershell
-cargo run -- package path\to\install.toml --output dist
+cargo run -- package path\to\${AppName}-install.toml --output dist
 ```
 
 Current output:
@@ -53,7 +53,7 @@ When the .NET SDK is available, the Rust build publishes a self-contained C# Win
 Direct engine commands:
 
 ```powershell
-cargo run -- --headless install path\to\install.toml
+cargo run -- --headless install path\to\${AppName}-install.toml
 cargo run -- --headless uninstall path\to\journal.json
 ```
 
@@ -109,14 +109,16 @@ Current TUI behavior includes:
 
 The current manifest supports:
 
-- `directories`
+- `directories.paths`
 - `files`
 - `registry`
 - `shortcuts`
 - `scripts`
 - `purge`
 
-The sample manifest lives at [`examples/install.toml`](C:\Users\jasonross\workspace\covenant-setup\examples\install.toml).
+Only `app_name` and shortcut `description` may contain spaces in manifest content. The manifest file path and every other manifest string field must be whitespace-free.
+
+The sample manifest lives at [`examples/Covenant-SetupSampleApp-install.toml`](C:\Users\jasonross\workspace\covenant-setup\examples\Covenant-SetupSampleApp-install.toml).
 
 ## Architecture Notes
 
@@ -181,7 +183,7 @@ The self-install manifest used for this path lives at [`vm/self-test/install.tom
 - `%LOCALAPPDATA%\CovenantSetupSelfTest\journal.json`
 - `%LOCALAPPDATA%\CovenantSetupSelfTest\covenant-setup-uninstall.exe`
 - `HKCU\Software\CovenantSetupSelfTest\InstallRoot`
-- `Desktop\Covenant Setup Self Test.lnk`
+- `Desktop\CovenantSetupSelfTest.lnk`
 
 It then immediately invokes the installed uninstaller with the generated journal and verifies that the install root, payload, journal, uninstaller, shortcut, application registry key, and Installed Apps registration are removed.
 

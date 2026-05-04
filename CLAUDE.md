@@ -15,10 +15,10 @@ cargo build            # Debug build
 cargo build --release  # Release build
 
 # Package: bundle manifest + payload into a single-file installer EXE
-cargo run -- package examples/install.toml --output dist
+cargo run -- package examples/Covenant-SetupSampleApp-install.toml --output dist
 
 # Install: apply a manifest directly (or from embedded bundle)
-cargo run -- install examples/install.toml --json
+cargo run -- install examples/Covenant-SetupSampleApp-install.toml --json
 
 # Uninstall: reverse all journaled actions
 cargo run -- uninstall examples/journal.json --json
@@ -35,7 +35,7 @@ dotnet test ui/Covenant.Setup.Ui.Tests/Covenant.Setup.Ui.Tests.csproj
 Real Win32/UAC/registry boundaries are validated by the Vagrant harness
 (`scripts/run-windows-vm-coverage.ps1`) — see
 `docs/integration-tests-architecture.md`. Manual interactive testing uses
-the example manifest (`examples/install.toml`).
+the example manifest (`examples/Covenant-SetupSampleApp-install.toml`).
 
 ## Architecture
 

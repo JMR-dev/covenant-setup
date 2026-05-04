@@ -18,8 +18,6 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
     private string _tomlPreview = string.Empty;
     private string _validationSummary = string.Empty;
     private bool _hasValidationErrors;
-    private bool _suppressPreviewRefresh;
-    private SuggestedManifestEntries _suggestedEntries = SuggestedManifestEntries.Empty;
     private readonly Func<CovenantSetupTool?> _locateCovenantSetupTool;
 
     public MainViewModel()
@@ -38,7 +36,7 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
         PurgePaths.CollectionChanged += CollectionChanged;
         PurgeRegistryBranches.CollectionChanged += CollectionChanged;
         RefreshCovenantSetupTool();
-        ApplyDefaults(resetCollections: true);
+        RefreshPreview();
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -48,6 +46,10 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
         get => _appName;
         set => SetProperty(ref _appName, value);
     }
+
+    public string ExpectedManifestFileName => ManifestFileName(AppName);
+
+    public string ManifestSubtitle => "Create " + ExpectedManifestFileName + " for covenant-setup";
 
     public string InstallRootToken
     {
@@ -123,87 +125,13 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
         }
     }
 
-    public ObservableCollection<DirectorySpec> Directories { get; } = [];
+    public ObservableCollection<string> Directories { get; } = [];
     public ObservableCollection<FileSpec> Files { get; } = [];
     public ObservableCollection<RegistrySpec> Registry { get; } = [];
     public ObservableCollection<ShortcutSpec> Shortcuts { get; } = [];
     public ObservableCollection<ScriptSpec> Scripts { get; } = [];
     public ObservableCollection<string> PurgePaths { get; } = [];
     public ObservableCollection<string> PurgeRegistryBranches { get; } = [];
-
-    public void ApplyDefaults(bool resetCollections)
-    {
-        _suppressPreviewRefresh = true;
-        try
-        {
-            if (resetCollections)
-            {
-                Directories.Clear();
-                Files.Clear();
-                Registry.Clear();
-                Shortcuts.Clear();
-                Scripts.Clear();
-                PurgePaths.Clear();
-                PurgeRegistryBranches.Clear();
-            }
-            else
-            {
-                RemoveSuggestedEntries(_suggestedEntries);
-            }
-
-            var suggestedEntries = BuildSuggestedEntries();
-            AddSuggestedEntries(suggestedEntries);
-            _suggestedEntries = suggestedEntries;
-        }
-        finally
-        {
-            _suppressPreviewRefresh = false;
-        }
-
-        RefreshPreview();
-    }
-
-    private SuggestedManifestEntries BuildSuggestedEntries()
-    {
-        var folder = string.IsNullOrWhiteSpace(ApplicationFolder)
-            ? SanitizeIdentifier(AppName)
-            : SanitizeIdentifier(ApplicationFolder);
-        SetProperty(ref _applicationFolder, folder, nameof(ApplicationFolder), refreshPreview: false);
-
-        var root = InstallRootToken.TrimEnd('\\') + "\\" + folder;
-        var registryBranch = @"HKCU\Software\" + folder;
-        var directories = new List<DirectorySpec>
-        {
-            new(root),
-            new(root + @"\bin")
-        };
-        var files = new List<FileSpec>();
-        var shortcuts = new List<ShortcutSpec>();
-
-        if (!string.IsNullOrWhiteSpace(PrimaryPayload))
-        {
-            var fileName = Path.GetFileName(PrimaryPayload.Trim());
-            if (!string.IsNullOrWhiteSpace(fileName))
-            {
-                var destination = root + @"\bin\" + fileName;
-                files.Add(new FileSpec(PrimaryPayload.Trim(), destination));
-                shortcuts.Add(new ShortcutSpec(
-                    @"{Desktop}\" + AppName.Trim() + ".lnk",
-                    destination,
-                    null,
-                    root,
-                    "Launch " + AppName.Trim()));
-            }
-        }
-
-        return new SuggestedManifestEntries(
-            directories,
-            files,
-            [new RegistrySpec(registryBranch, "InstallRoot", root)],
-            shortcuts,
-            [root],
-            [registryBranch]);
-    }
 
     public void RefreshCovenantSetupTool()
     {
@@ -215,7 +143,7 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
 
     public void AddDirectory(string path)
     {
-        AddTrimmed(Directories, path, value => new DirectorySpec(value));
+        AddTrimmed(Directories, path, value => value);
     }
 
     public void AddFile(string source, string destination)
@@ -275,20 +203,24 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
         AddTrimmed(PurgeRegistryBranches, branch, value => value);
     }
 
-    public ManifestDocument BuildDocument() => new()
+    public ManifestDocument BuildDocument()
     {
-        AppName = AppName.Trim(),
-        Directories = Directories.ToArray(),
-        Files = Files.ToArray(),
-        Registry = Registry.ToArray(),
-        Shortcuts = Shortcuts.ToArray(),
-        Scripts = Scripts.ToArray(),
-        Purge = new PurgeSpec
+        var template = BuildTemplateEntries();
+        return new ManifestDocument
         {
-            Paths = PurgePaths.ToArray(),
-            RegistryBranches = PurgeRegistryBranches.ToArray()
-        }
-    };
+            AppName = AppName.Trim(),
+            Directories = CombineUnique(template.Directories, Directories),
+            Files = CombineUnique(template.Files, Files),
+            Registry = CombineUnique(template.Registry, Registry),
+            Shortcuts = CombineUnique(template.Shortcuts, Shortcuts),
+            Scripts = Scripts.ToArray(),
+            Purge = new PurgeSpec
+            {
+                Paths = CombineUnique(template.PurgePaths, PurgePaths),
+                RegistryBranches = CombineUnique(template.PurgeRegistryBranches, PurgeRegistryBranches)
+            }
+        };
+    }
 
     public ValidationResult Validate()
     {
@@ -299,13 +231,22 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
         {
             errors.Add("App name is required.");
         }
+        else if (AppName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+        {
+            errors.Add("App name cannot contain characters that are invalid in Windows file names.");
+        }
 
-        if (Directories.Count + Files.Count + Registry.Count + Shortcuts.Count + Scripts.Count == 0)
+        var document = BuildDocument();
+
+        if (document.Directories.Count + document.Files.Count + document.Registry.Count + document.Shortcuts.Count + document.Scripts.Count == 0)
         {
             errors.Add("Add at least one install action.");
         }
 
-        foreach (var file in Files)
+        ValidateManifestSpacing(document, errors);
+        ValidateNoWhitespace(errors, "Application target installation folder", ApplicationFolder);
+
+        foreach (var file in document.Files)
         {
             if (Path.IsPathRooted(file.Source))
             {
@@ -313,7 +254,7 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
             }
         }
 
-        foreach (var registry in Registry)
+        foreach (var registry in document.Registry)
         {
             if (!IsSupportedRegistryRoot(registry.Key))
             {
@@ -321,7 +262,7 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
             }
         }
 
-        foreach (var branch in PurgeRegistryBranches)
+        foreach (var branch in document.Purge.RegistryBranches)
         {
             if (!IsSupportedRegistryRoot(branch))
             {
@@ -329,12 +270,12 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
             }
         }
 
-        if (Registry.Any(entry => entry.Key.StartsWith(@"HKLM\", StringComparison.OrdinalIgnoreCase)) ||
-            PurgeRegistryBranches.Any(branch => branch.StartsWith(@"HKLM\", StringComparison.OrdinalIgnoreCase)) ||
-            Directories.Any(directory => RequiresAdminPath(directory.Path)) ||
-            Files.Any(file => RequiresAdminPath(file.Destination)) ||
-            Shortcuts.Any(shortcut => RequiresAdminPath(shortcut.Path)) ||
-            PurgePaths.Any(RequiresAdminPath))
+        if (document.Registry.Any(entry => entry.Key.StartsWith(@"HKLM\", StringComparison.OrdinalIgnoreCase)) ||
+            document.Purge.RegistryBranches.Any(branch => branch.StartsWith(@"HKLM\", StringComparison.OrdinalIgnoreCase)) ||
+            document.Directories.Any(RequiresAdminPath) ||
+            document.Files.Any(file => RequiresAdminPath(file.Destination)) ||
+            document.Shortcuts.Any(shortcut => RequiresAdminPath(shortcut.Path)) ||
+            document.Purge.Paths.Any(RequiresAdminPath))
         {
             warnings.Add("This manifest appears to require elevation because it targets Program Files or HKLM.");
         }
@@ -368,6 +309,11 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
 
         field = value;
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        if (propertyName == nameof(AppName))
+        {
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ExpectedManifestFileName)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ManifestSubtitle)));
+        }
         if (propertyName == nameof(OutputDirectory))
         {
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CanPackage)));
@@ -381,30 +327,7 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
 
     private void CollectionChanged(object? sender, NotifyCollectionChangedEventArgs args)
     {
-        if (!_suppressPreviewRefresh)
-        {
-            RefreshPreview();
-        }
-    }
-
-    private void AddSuggestedEntries(SuggestedManifestEntries entries)
-    {
-        AddRangeUnique(Directories, entries.Directories);
-        AddRangeUnique(Files, entries.Files);
-        AddRangeUnique(Registry, entries.Registry);
-        AddRangeUnique(Shortcuts, entries.Shortcuts);
-        AddRangeUnique(PurgePaths, entries.PurgePaths);
-        AddRangeUnique(PurgeRegistryBranches, entries.PurgeRegistryBranches);
-    }
-
-    private void RemoveSuggestedEntries(SuggestedManifestEntries entries)
-    {
-        RemoveRange(Directories, entries.Directories);
-        RemoveRange(Files, entries.Files);
-        RemoveRange(Registry, entries.Registry);
-        RemoveRange(Shortcuts, entries.Shortcuts);
-        RemoveRange(PurgePaths, entries.PurgePaths);
-        RemoveRange(PurgeRegistryBranches, entries.PurgeRegistryBranches);
+        RefreshPreview();
     }
 
     private static void AddTrimmed<T>(
@@ -426,22 +349,6 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
         }
     }
 
-    private static void AddRangeUnique<T>(ObservableCollection<T> collection, IEnumerable<T> items)
-    {
-        foreach (var item in items)
-        {
-            AddUnique(collection, item);
-        }
-    }
-
-    private static void RemoveRange<T>(ICollection<T> collection, IEnumerable<T> items)
-    {
-        foreach (var item in items)
-        {
-            collection.Remove(item);
-        }
-    }
-
     private static string? NullIfWhiteSpace(string? value) =>
         string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
@@ -455,23 +362,152 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
         value.StartsWith(@"C:\Program Files\", StringComparison.OrdinalIgnoreCase) ||
         value.StartsWith(@"C:\Program Files (x86)\", StringComparison.OrdinalIgnoreCase);
 
+    private static void ValidateManifestSpacing(ManifestDocument document, List<string> errors)
+    {
+        foreach (var directory in document.Directories)
+        {
+            ValidateNoWhitespace(errors, "Directory path", directory);
+        }
+
+        foreach (var file in document.Files)
+        {
+            ValidateNoWhitespace(errors, "File source", file.Source);
+            ValidateNoWhitespace(errors, "File destination", file.Destination);
+        }
+
+        foreach (var registry in document.Registry)
+        {
+            ValidateNoWhitespace(errors, "Registry key", registry.Key);
+            ValidateNoWhitespace(errors, "Registry name", registry.Name);
+            ValidateNoWhitespace(errors, "Registry value", registry.Value);
+        }
+
+        foreach (var shortcut in document.Shortcuts)
+        {
+            ValidateNoWhitespace(errors, "Shortcut path", shortcut.Path);
+            ValidateNoWhitespace(errors, "Shortcut target", shortcut.Target);
+            ValidateOptionalNoWhitespace(errors, "Shortcut arguments", shortcut.Arguments);
+            ValidateOptionalNoWhitespace(errors, "Shortcut working directory", shortcut.WorkingDirectory);
+        }
+
+        foreach (var script in document.Scripts)
+        {
+            ValidateNoWhitespace(errors, "Script command", script.Command);
+            for (var index = 0; index < script.Args.Count; index++)
+            {
+                ValidateNoWhitespace(errors, $"Script argument {index + 1}", script.Args[index]);
+            }
+            ValidateOptionalNoWhitespace(errors, "Script working directory", script.WorkingDirectory);
+        }
+
+        foreach (var branch in document.Purge.RegistryBranches)
+        {
+            ValidateNoWhitespace(errors, "Purge registry branch", branch);
+        }
+
+        foreach (var path in document.Purge.Paths)
+        {
+            ValidateNoWhitespace(errors, "Purge path", path);
+        }
+    }
+
+    private static void ValidateOptionalNoWhitespace(List<string> errors, string fieldName, string? value)
+    {
+        if (!string.IsNullOrWhiteSpace(value))
+        {
+            ValidateNoWhitespace(errors, fieldName, value);
+        }
+    }
+
+    private static void ValidateNoWhitespace(List<string> errors, string fieldName, string value)
+    {
+        if (ContainsWhitespace(value))
+        {
+            errors.Add($"{fieldName} cannot contain spaces or other whitespace.");
+        }
+    }
+
     private static string SanitizeIdentifier(string value)
     {
         var sanitized = IdentifierRegex().Replace(value.Trim(), "_").Trim('_');
         return string.IsNullOrWhiteSpace(sanitized) ? "covenant_setup" : sanitized;
     }
 
+    internal static string ManifestFileName(string appName)
+    {
+        var name = new string(appName.Trim().Where(ch => !char.IsWhiteSpace(ch)).ToArray());
+        return string.IsNullOrWhiteSpace(name) ? "install.toml" : name + "-install.toml";
+    }
+
+    internal bool IsExpectedManifestPath(string path) =>
+        string.Equals(
+            Path.GetFileName(path),
+            ExpectedManifestFileName,
+            StringComparison.OrdinalIgnoreCase) &&
+        !ContainsWhitespace(path);
+
+    internal static bool ContainsWhitespace(string value) =>
+        value.Any(char.IsWhiteSpace);
+
     [GeneratedRegex(@"[^A-Za-z0-9_-]+")]
     private static partial Regex IdentifierRegex();
 
-    private sealed record SuggestedManifestEntries(
-        IReadOnlyList<DirectorySpec> Directories,
+    private TemplateManifestEntries BuildTemplateEntries()
+    {
+        var appName = AppName.Trim();
+        var folder = string.IsNullOrWhiteSpace(ApplicationFolder)
+            ? SanitizeIdentifier(appName)
+            : SanitizeIdentifier(ApplicationFolder);
+        var root = InstallRootToken.TrimEnd('\\') + "\\" + folder;
+        var registryBranch = @"HKCU\Software\" + folder;
+        var files = new List<FileSpec>();
+        var shortcuts = new List<ShortcutSpec>();
+
+        if (!string.IsNullOrWhiteSpace(PrimaryPayload))
+        {
+            var source = PrimaryPayload.Trim();
+            var fileName = Path.GetFileName(source);
+            if (!string.IsNullOrWhiteSpace(fileName))
+            {
+                var destination = root + @"\bin\" + fileName;
+                files.Add(new FileSpec(source, destination));
+                shortcuts.Add(new ShortcutSpec(
+                    @"{Desktop}\" + folder + ".lnk",
+                    destination,
+                    null,
+                    root,
+                    "Launch " + appName));
+            }
+        }
+
+        return new TemplateManifestEntries(
+            [root, root + @"\bin"],
+            files,
+            [new RegistrySpec(registryBranch, "InstallRoot", root)],
+            shortcuts,
+            [root],
+            [registryBranch]);
+    }
+
+    private static IReadOnlyList<T> CombineUnique<T>(IEnumerable<T> first, IEnumerable<T> second)
+    {
+        var values = new List<T>();
+        foreach (var item in first.Concat(second))
+        {
+            if (!values.Contains(item))
+            {
+                values.Add(item);
+            }
+        }
+
+        return values;
+    }
+
+    private sealed record TemplateManifestEntries(
+        IReadOnlyList<string> Directories,
         IReadOnlyList<FileSpec> Files,
         IReadOnlyList<RegistrySpec> Registry,
         IReadOnlyList<ShortcutSpec> Shortcuts,
         IReadOnlyList<string> PurgePaths,
-        IReadOnlyList<string> PurgeRegistryBranches)
-    {
-        public static SuggestedManifestEntries Empty { get; } = new([], [], [], [], [], []);
-    }
+        IReadOnlyList<string> PurgeRegistryBranches);
 }

@@ -26,7 +26,6 @@ use ui::ProgressSink;
 
 const EXIT_ELEVATION_REQUIRED: i32 = 33;
 const EXIT_OPERATION_FAILED: i32 = 1;
-const BUNDLE_MANIFEST: &str = "install.toml";
 const EMBEDDED_MAGIC: &[u8] = b"COVENANT_SETUP_BUNDLE_V1";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 static FAILURE_UX_SHOWN: AtomicBool = AtomicBool::new(false);
@@ -81,8 +80,8 @@ enum Commands {
 #[derive(Debug, Deserialize)]
 struct InstallManifest {
     app_name: String,
-    #[serde(default)]
-    directories: Vec<DirectorySpec>,
+    #[serde(default, deserialize_with = "deserialize_directory_paths")]
+    directories: Vec<String>,
     #[serde(default)]
     files: Vec<FileSpec>,
     #[serde(default)]
@@ -104,8 +103,16 @@ struct PurgeSpec {
 }
 
 #[derive(Debug, Deserialize)]
-struct DirectorySpec {
-    path: String,
+struct DirectoryPaths {
+    #[serde(default)]
+    paths: Vec<String>,
+}
+
+fn deserialize_directory_paths<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(DirectoryPaths::deserialize(deserializer)?.paths)
 }
 
 #[derive(Debug, Deserialize)]
@@ -489,7 +496,7 @@ fn run(cli: Cli, sys: &dyn Sys, logger: &Logger) -> Result<(), AppError> {
 }
 
 fn package(manifest_path: &Path, output_root: &Path, logger: &Logger) -> Result<(), AppError> {
-    let manifest: InstallManifest = toml::from_str(&fs::read_to_string(manifest_path)?)?;
+    let manifest = read_install_manifest(manifest_path)?;
     let current_exe = std::env::current_exe()?;
     let manifest_dir = manifest_path
         .parent()
@@ -514,6 +521,125 @@ fn package(manifest_path: &Path, output_root: &Path, logger: &Logger) -> Result<
     Ok(())
 }
 
+fn read_install_manifest(manifest_path: &Path) -> Result<InstallManifest, AppError> {
+    let manifest: InstallManifest = toml::from_str(&fs::read_to_string(manifest_path)?)?;
+    enforce_manifest_file_name(manifest_path, &manifest)?;
+    enforce_manifest_field_spacing(&manifest)?;
+    Ok(manifest)
+}
+
+fn enforce_manifest_file_name(
+    manifest_path: &Path,
+    manifest: &InstallManifest,
+) -> Result<(), AppError> {
+    let manifest_path_text = manifest_path.to_string_lossy();
+    if contains_whitespace(&manifest_path_text) {
+        return Err(AppError::Message(format!(
+            "Manifest path cannot contain spaces: {}",
+            manifest_path.display()
+        )));
+    }
+
+    let expected = expected_manifest_file_name(&manifest.app_name);
+    let actual = manifest_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| AppError::Message("Manifest path must include a file name".into()))?;
+    if actual != expected {
+        return Err(AppError::Message(format!(
+            "Manifest file name must be '{expected}' for app_name '{}'; got '{actual}'",
+            manifest.app_name
+        )));
+    }
+
+    Ok(())
+}
+
+fn enforce_manifest_field_spacing(manifest: &InstallManifest) -> Result<(), AppError> {
+    for (index, directory) in manifest.directories.iter().enumerate() {
+        enforce_no_whitespace(&format!("directories.paths[{index}]"), directory)?;
+    }
+
+    for (index, file) in manifest.files.iter().enumerate() {
+        enforce_no_whitespace(&format!("files[{index}].source"), &file.source)?;
+        enforce_no_whitespace(&format!("files[{index}].destination"), &file.destination)?;
+    }
+
+    for (index, registry) in manifest.registry.iter().enumerate() {
+        enforce_no_whitespace(&format!("registry[{index}].key"), &registry.key)?;
+        enforce_no_whitespace(&format!("registry[{index}].name"), &registry.name)?;
+        enforce_no_whitespace(&format!("registry[{index}].value"), &registry.value)?;
+    }
+
+    for (index, shortcut) in manifest.shortcuts.iter().enumerate() {
+        enforce_no_whitespace(&format!("shortcuts[{index}].path"), &shortcut.path)?;
+        enforce_no_whitespace(&format!("shortcuts[{index}].target"), &shortcut.target)?;
+        enforce_optional_no_whitespace(
+            &format!("shortcuts[{index}].arguments"),
+            shortcut.arguments.as_deref(),
+        )?;
+        enforce_optional_no_whitespace(
+            &format!("shortcuts[{index}].working_directory"),
+            shortcut.working_directory.as_deref(),
+        )?;
+    }
+
+    for (index, script) in manifest.scripts.iter().enumerate() {
+        enforce_no_whitespace(&format!("scripts[{index}].command"), &script.command)?;
+        for (arg_index, arg) in script.args.iter().enumerate() {
+            enforce_no_whitespace(&format!("scripts[{index}].args[{arg_index}]"), arg)?;
+        }
+        enforce_optional_no_whitespace(
+            &format!("scripts[{index}].working_directory"),
+            script.working_directory.as_deref(),
+        )?;
+    }
+
+    for (index, branch) in manifest.purge.registry_branches.iter().enumerate() {
+        enforce_no_whitespace(&format!("purge.registry_branches[{index}]"), branch)?;
+    }
+
+    for (index, path) in manifest.purge.paths.iter().enumerate() {
+        enforce_no_whitespace(&format!("purge.paths[{index}]"), path)?;
+    }
+
+    Ok(())
+}
+
+fn enforce_optional_no_whitespace(field: &str, value: Option<&str>) -> Result<(), AppError> {
+    if let Some(value) = value {
+        enforce_no_whitespace(field, value)?;
+    }
+    Ok(())
+}
+
+fn enforce_no_whitespace(field: &str, value: &str) -> Result<(), AppError> {
+    if contains_whitespace(value) {
+        return Err(AppError::Message(format!(
+            "Manifest field '{field}' cannot contain spaces or other whitespace: {value}"
+        )));
+    }
+
+    Ok(())
+}
+
+fn contains_whitespace(value: &str) -> bool {
+    value.chars().any(char::is_whitespace)
+}
+
+fn expected_manifest_file_name(app_name: &str) -> String {
+    let name: String = app_name
+        .trim()
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect();
+    if name.is_empty() {
+        "install.toml".to_string()
+    } else {
+        format!("{name}-install.toml")
+    }
+}
+
 fn build_packaged_installer(
     exe_target: &Path,
     current_exe: &Path,
@@ -523,12 +649,18 @@ fn build_packaged_installer(
     logger: &Logger,
 ) -> Result<(), AppError> {
     fs::copy(current_exe, &exe_target)?;
+    let bundled_manifest_name = expected_manifest_file_name(&manifest.app_name);
     let bundle = EmbeddedBundle {
         metadata: PackagedApp {
             app_name: manifest.app_name.clone(),
-            manifest: BUNDLE_MANIFEST.to_string(),
+            manifest: bundled_manifest_name.clone(),
         },
-        files: collect_bundle_files(manifest_dir, manifest_path, &[exe_target.to_path_buf()])?,
+        files: collect_bundle_files(
+            manifest_dir,
+            manifest_path,
+            &bundled_manifest_name,
+            &[exe_target.to_path_buf()],
+        )?,
     };
     append_embedded_bundle(exe_target, &bundle)?;
     logger.info(
@@ -544,6 +676,7 @@ fn build_packaged_installer(
 fn collect_bundle_files(
     source_root: &Path,
     manifest_path: &Path,
+    bundled_manifest_name: &str,
     excluded_paths: &[PathBuf],
 ) -> Result<Vec<EmbeddedFile>, AppError> {
     let mut files = Vec::new();
@@ -551,6 +684,7 @@ fn collect_bundle_files(
         source_root,
         source_root,
         manifest_path,
+        bundled_manifest_name,
         excluded_paths,
         &mut files,
     )?;
@@ -561,6 +695,7 @@ fn collect_bundle_files_recursive(
     source_root: &Path,
     current: &Path,
     manifest_path: &Path,
+    bundled_manifest_name: &str,
     excluded_paths: &[PathBuf],
     files: &mut Vec<EmbeddedFile>,
 ) -> Result<(), AppError> {
@@ -584,12 +719,13 @@ fn collect_bundle_files_recursive(
                 source_root,
                 &path,
                 manifest_path,
+                bundled_manifest_name,
                 excluded_paths,
                 files,
             )?;
         } else {
-            let relative_path = if path == manifest_path {
-                BUNDLE_MANIFEST.to_string()
+            let relative_path = if same_path(&path, manifest_path) {
+                bundled_manifest_name.to_string()
             } else {
                 relative.to_string_lossy().to_string()
             };
@@ -822,7 +958,7 @@ fn install(
     progress_override: Option<Box<dyn ProgressSink>>,
     logger: &Logger,
 ) -> Result<(), AppError> {
-    let manifest: InstallManifest = toml::from_str(&fs::read_to_string(manifest_path)?)?;
+    let manifest = read_install_manifest(manifest_path)?;
     trace_event(
         "install_start",
         json!({"manifest": manifest_path, "app_name": &manifest.app_name}),
@@ -863,7 +999,7 @@ fn install(
 
         let mut progress_step = 0usize;
         for directory in &manifest.directories {
-            let path = resolver.resolve(&directory.path);
+            let path = resolver.resolve(directory);
             effective_logger.info("create_directory", json!({"path":path}));
             advance_gui_progress_step(
                 &mut gui_progress,
@@ -1355,7 +1491,7 @@ fn infer_install_root(manifest: &InstallManifest, resolver: &win::PathResolver) 
         return Some(resolver.resolve(path));
     }
     if let Some(directory) = manifest.directories.first() {
-        return Some(resolver.resolve(&directory.path));
+        return Some(resolver.resolve(directory));
     }
     if let Some(file) = manifest.files.first() {
         return resolver
@@ -1780,7 +1916,7 @@ fn manifest_requires_admin(
     resolver: &win::PathResolver,
 ) -> Result<bool, AppError> {
     for directory in &manifest.directories {
-        if resolver.requires_admin(&resolver.resolve(&directory.path)) {
+        if resolver.requires_admin(&resolver.resolve(directory)) {
             return Ok(true);
         }
     }
@@ -1997,15 +2133,16 @@ mod tests {
         let temp = TestDir::new("bundle-round-trip");
         let exe = temp.path().join("installer.exe");
         fs::write(&exe, b"stub executable bytes").unwrap();
+        let manifest_name = expected_manifest_file_name("Round Trip App");
 
         let bundle = EmbeddedBundle {
             metadata: PackagedApp {
                 app_name: "Round Trip App".to_string(),
-                manifest: BUNDLE_MANIFEST.to_string(),
+                manifest: manifest_name.clone(),
             },
             files: vec![
                 EmbeddedFile {
-                    relative_path: BUNDLE_MANIFEST.to_string(),
+                    relative_path: manifest_name,
                     data: b"app_name = 'Round Trip App'".to_vec(),
                 },
                 EmbeddedFile {
@@ -2077,7 +2214,7 @@ mod tests {
         let index = EmbeddedBundleIndex {
             metadata: PackagedApp {
                 app_name: "Bad File".to_string(),
-                manifest: BUNDLE_MANIFEST.to_string(),
+                manifest: expected_manifest_file_name("Bad File"),
             },
             files: vec![EmbeddedFileIndexEntry {
                 relative_path: "payload.bin".to_string(),
@@ -2101,7 +2238,7 @@ mod tests {
         let index = EmbeddedBundleIndex {
             metadata: PackagedApp {
                 app_name: "Trailing".to_string(),
-                manifest: BUNDLE_MANIFEST.to_string(),
+                manifest: expected_manifest_file_name("Trailing"),
             },
             files: vec![EmbeddedFileIndexEntry {
                 relative_path: "empty.bin".to_string(),
@@ -2127,7 +2264,7 @@ mod tests {
         let bundle = EmbeddedBundle {
             metadata: PackagedApp {
                 app_name: "Extract App".to_string(),
-                manifest: BUNDLE_MANIFEST.to_string(),
+                manifest: expected_manifest_file_name("Extract App"),
             },
             files: vec![EmbeddedFile {
                 relative_path: "nested\\payload.txt".to_string(),
@@ -2163,7 +2300,7 @@ mod tests {
         let temp = TestDir::new("package-installer");
         let source_root = temp.path().join("source");
         let payload_dir = source_root.join("payload");
-        let manifest_path = source_root.join("app.toml");
+        let manifest_path = source_root.join(expected_manifest_file_name("Packaged App"));
         let current_exe = temp.path().join("current.exe");
         let exe_target = source_root
             .join("dist")
@@ -2202,8 +2339,15 @@ mod tests {
             .sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
 
         assert_eq!(bundle.metadata.app_name, "Packaged App");
+        assert_eq!(
+            bundle.metadata.manifest,
+            expected_manifest_file_name("Packaged App")
+        );
         assert_eq!(bundle.files.len(), 2);
-        assert_eq!(bundle.files[0].relative_path, BUNDLE_MANIFEST);
+        assert_eq!(
+            bundle.files[0].relative_path,
+            expected_manifest_file_name("Packaged App")
+        );
         assert_eq!(bundle.files[1].relative_path, "payload\\app.bin");
         assert_eq!(bundle.files[1].data, b"payload bytes");
     }
@@ -2211,7 +2355,8 @@ mod tests {
     #[test]
     fn collect_bundle_files_renames_manifest_and_preserves_nested_payloads() {
         let temp = TestDir::new("collect-bundle");
-        let manifest = temp.path().join("source.toml");
+        let manifest = temp.path().join("CollectedApp-install.toml");
+        let bundled_manifest_name = expected_manifest_file_name("Collected App");
         let nested_dir = temp.path().join("payload").join("bin");
         let nested_file = nested_dir.join("app.cmd");
         let journal = temp.path().join("journal.json");
@@ -2228,12 +2373,17 @@ mod tests {
         fs::write(&generated_installer, b"generated installer").unwrap();
         fs::write(&generated_uninstaller, b"generated uninstaller").unwrap();
 
-        let mut files =
-            collect_bundle_files(temp.path(), &manifest, &[generated_installer.clone()]).unwrap();
+        let mut files = collect_bundle_files(
+            temp.path(),
+            &manifest,
+            &bundled_manifest_name,
+            &[generated_installer.clone()],
+        )
+        .unwrap();
         files.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
 
         assert_eq!(files.len(), 2);
-        assert_eq!(files[0].relative_path, BUNDLE_MANIFEST);
+        assert_eq!(files[0].relative_path, bundled_manifest_name);
         assert_eq!(files[0].data, b"app_name = 'Collected App'");
         assert_eq!(files[1].relative_path, "payload\\bin\\app.cmd");
         assert_eq!(files[1].data, b"@echo off");
@@ -2299,6 +2449,43 @@ mod tests {
         assert_eq!(decoded, journal);
         assert!(serialized.contains("\"type\": \"create_directory\""));
         assert!(serialized.contains("\"root\": \"hkcu\""));
+    }
+
+    #[test]
+    fn manifest_deserializes_grouped_directories() {
+        let manifest: InstallManifest = toml::from_str(
+            r#"
+app_name = 'Grouped App'
+
+[directories]
+paths = [
+  '{LocalAppData}\Grouped',
+  '{LocalAppData}\Grouped\bin',
+]
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(manifest.directories.len(), 2);
+        assert_eq!(manifest.directories[0], r"{LocalAppData}\Grouped");
+        assert_eq!(manifest.directories[1], r"{LocalAppData}\Grouped\bin");
+    }
+
+    #[test]
+    fn manifest_rejects_legacy_directory_tables() {
+        let result = toml::from_str::<InstallManifest>(
+            r#"
+app_name = 'Legacy App'
+
+[[directories]]
+path = '{LocalAppData}\Legacy'
+
+[[directories]]
+path = '{LocalAppData}\Legacy\bin'
+"#,
+        );
+
+        assert!(result.is_err());
     }
 
     #[test]
@@ -2379,6 +2566,109 @@ mod tests {
     }
 
     #[test]
+    fn manifest_file_name_must_match_app_name_convention() {
+        let manifest = InstallManifest {
+            app_name: "Sample App".to_string(),
+            directories: Vec::new(),
+            files: Vec::new(),
+            registry: Vec::new(),
+            shortcuts: Vec::new(),
+            scripts: Vec::new(),
+            purge: PurgeSpec::default(),
+        };
+
+        enforce_manifest_file_name(Path::new("SampleApp-install.toml"), &manifest).unwrap();
+
+        let err = enforce_manifest_file_name(Path::new("install.toml"), &manifest)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("SampleApp-install.toml"));
+
+        let err = enforce_manifest_file_name(
+            Path::new("manifest folder\\SampleApp-install.toml"),
+            &manifest,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("cannot contain spaces"));
+    }
+
+    #[test]
+    fn manifest_field_spacing_allows_only_app_name_and_description_spaces() {
+        let mut manifest = InstallManifest {
+            app_name: "Display Name With Spaces".to_string(),
+            directories: vec!["{LocalAppData}\\NoSpaces".to_string()],
+            files: vec![FileSpec {
+                source: "payload\\app.exe".to_string(),
+                destination: "{LocalAppData}\\NoSpaces\\app.exe".to_string(),
+            }],
+            registry: vec![RegistrySpec {
+                key: "HKCU\\Software\\NoSpaces".to_string(),
+                name: "InstallRoot".to_string(),
+                value: "{LocalAppData}\\NoSpaces".to_string(),
+            }],
+            shortcuts: vec![ShortcutSpec {
+                path: "{Desktop}\\NoSpaces.lnk".to_string(),
+                target: "{LocalAppData}\\NoSpaces\\app.exe".to_string(),
+                arguments: Some("--profile=default".to_string()),
+                working_directory: Some("{LocalAppData}\\NoSpaces".to_string()),
+                description: Some("Description can have spaces".to_string()),
+            }],
+            scripts: vec![ScriptSpec {
+                command: "powershell.exe".to_string(),
+                args: vec![
+                    "-ExecutionPolicy".to_string(),
+                    "Bypass".to_string(),
+                    "-File".to_string(),
+                    "payload\\post_install.ps1".to_string(),
+                ],
+                working_directory: Some("{LocalAppData}\\NoSpaces".to_string()),
+            }],
+            purge: PurgeSpec {
+                registry_branches: vec!["HKCU\\Software\\NoSpaces".to_string()],
+                paths: vec!["{LocalAppData}\\NoSpaces".to_string()],
+            },
+        };
+
+        enforce_manifest_field_spacing(&manifest).unwrap();
+
+        manifest.scripts[0].args[3] = "payload\\post install.ps1".to_string();
+        let err = enforce_manifest_field_spacing(&manifest)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("scripts[0].args[3]"));
+        assert!(err.contains("cannot contain spaces"));
+    }
+
+    #[test]
+    fn read_install_manifest_rejects_space_in_manifest_field() {
+        let temp = TestDir::new("manifest-field-spaces");
+        let manifest_path = temp.path().join("SpaceAllowed-install.toml");
+        fs::write(
+            &manifest_path,
+            r#"
+app_name = 'Space Allowed'
+
+[directories]
+paths = ['{LocalAppData}\Bad Path']
+
+[[shortcuts]]
+path = '{Desktop}\NoSpaces.lnk'
+target = '{LocalAppData}\NoSpaces\app.exe'
+description = 'Description can have spaces'
+"#,
+        )
+        .unwrap();
+
+        let err = read_install_manifest(&manifest_path)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("directories.paths[0]"));
+        assert!(err.contains("cannot contain spaces"));
+    }
+
+    #[test]
     fn should_exclude_from_bundle_matches_generated_artifacts_only() {
         assert!(should_exclude_from_bundle(Path::new("journal.json")));
         assert!(should_exclude_from_bundle(Path::new(
@@ -2415,7 +2705,7 @@ mod tests {
     #[test]
     fn run_package_command_creates_packaged_installer() {
         let temp = TestDir::new("run-package");
-        let manifest = temp.path().join("install.toml");
+        let manifest = temp.path().join("RunPackage-install.toml");
         let output = temp.path().join("dist");
         fs::write(&manifest, "app_name = 'Run Package'\n").unwrap();
 
@@ -2618,7 +2908,7 @@ mod tests {
     #[test]
     fn install_empty_manifest_writes_minimal_journal() {
         let temp = TestDir::new("install-empty");
-        let manifest_path = temp.path().join("install.toml");
+        let manifest_path = temp.path().join("EmptyApp-install.toml");
         fs::write(&manifest_path, "app_name = 'Empty App'\n").unwrap();
 
         install(
@@ -2818,9 +3108,7 @@ mod tests {
             win::PathResolver::with_roots_for_test(vec![PathBuf::from("C:\\Program Files")]);
         let mut manifest = sample_manifest();
         manifest.purge.paths = vec!["C:\\Users\\Alice\\App".to_string()];
-        manifest.directories = vec![DirectorySpec {
-            path: "C:\\Program Files\\Sample".to_string(),
-        }];
+        manifest.directories = vec!["C:\\Program Files\\Sample".to_string()];
         assert!(manifest_requires_admin(&manifest, &resolver).unwrap());
 
         manifest.directories.clear();
@@ -2862,9 +3150,7 @@ mod tests {
             win::PathResolver::with_roots_for_test(vec![PathBuf::from("C:\\Program Files")]);
         let manifest = InstallManifest {
             app_name: "User App".to_string(),
-            directories: vec![DirectorySpec {
-                path: "C:\\Users\\Alice\\AppData\\Local\\UserApp".to_string(),
-            }],
+            directories: vec!["C:\\Users\\Alice\\AppData\\Local\\UserApp".to_string()],
             files: vec![FileSpec {
                 source: "app.exe".to_string(),
                 destination: "C:\\Users\\Alice\\AppData\\Local\\UserApp\\app.exe".to_string(),
@@ -3529,7 +3815,7 @@ mod tests {
     #[test]
     fn run_install_subcommand_uses_sys_for_registry_writes() {
         let temp = TestDir::new("run-install-sys");
-        let manifest_path = temp.path().join("install.toml");
+        let manifest_path = temp.path().join("Mocked-install.toml");
         fs::write(
             &manifest_path,
             "app_name = 'Mocked'\n[[registry]]\nkey = 'HKCU\\\\Software\\\\Mocked'\nname = 'Foo'\nvalue = 'Bar'\n",
@@ -3591,7 +3877,7 @@ mod tests {
     #[test]
     fn install_emits_set_registry_string_calls_for_each_registry_spec() {
         let temp = TestDir::new("install-registry-mock");
-        let manifest_path = temp.path().join("install.toml");
+        let manifest_path = temp.path().join("RegApp-install.toml");
         fs::write(
             &manifest_path,
             "app_name = 'RegApp'\n[[registry]]\nkey = 'HKCU\\\\Software\\\\RegApp'\nname = 'Alpha'\nvalue = 'A'\n[[registry]]\nkey = 'HKCU\\\\Software\\\\RegApp'\nname = 'Beta'\nvalue = 'B'\n",
@@ -3805,9 +4091,7 @@ mod tests {
     fn sample_manifest() -> InstallManifest {
         InstallManifest {
             app_name: "Sample App".to_string(),
-            directories: vec![DirectorySpec {
-                path: "C:\\Apps\\Sample\\bin".to_string(),
-            }],
+            directories: vec!["C:\\Apps\\Sample\\bin".to_string()],
             files: vec![FileSpec {
                 source: "payload\\app.exe".to_string(),
                 destination: "C:\\Apps\\Sample\\app.exe".to_string(),

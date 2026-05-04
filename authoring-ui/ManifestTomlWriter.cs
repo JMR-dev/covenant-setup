@@ -9,11 +9,11 @@ internal static class ManifestTomlWriter
         var builder = new StringBuilder();
         AppendAssignment(builder, "app_name", document.AppName);
 
-        foreach (var directory in document.Directories)
+        if (document.Directories.Count > 0)
         {
             AppendBlankLine(builder);
-            builder.AppendLine("[[directories]]");
-            AppendAssignment(builder, "path", directory.Path);
+            builder.AppendLine("[directories]");
+            AppendArray(builder, "paths", document.Directories);
         }
 
         foreach (var file in document.Files)
@@ -118,6 +118,19 @@ internal static class ManifestTomlWriter
     }
 
     private static string TomlString(string value)
+    {
+        if (CanUseLiteralString(value))
+        {
+            return "'" + value + "'";
+        }
+
+        return BasicTomlString(value);
+    }
+
+    private static bool CanUseLiteralString(string value) =>
+        !value.Contains('\'') && value.All(ch => !char.IsControl(ch));
+
+    private static string BasicTomlString(string value)
     {
         var builder = new StringBuilder(value.Length + 2);
         builder.Append('"');
