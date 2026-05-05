@@ -156,6 +156,47 @@ public class MainViewModelTests
     }
 
     [Fact]
+    public void Generated_shortcut_tracks_app_info_and_allows_description_override()
+    {
+        var viewModel = new MainViewModel(() => null)
+        {
+            AppName = "Renamed App",
+            ApplicationFolder = "RenamedApp",
+            InstallRootToken = "{ProgramFilesX64}",
+            PrimaryPayload = @"payload\renamed.exe"
+        };
+
+        var defaultDocument = viewModel.BuildDocument();
+        var defaultShortcut = Assert.Single(defaultDocument.Shortcuts);
+        Assert.Equal(@"{Desktop}\RenamedApp.lnk", defaultShortcut.Path);
+        Assert.Equal(@"{ProgramFilesX64}\RenamedApp\bin\renamed.exe", defaultShortcut.Target);
+        Assert.Equal(@"{ProgramFilesX64}\RenamedApp", defaultShortcut.WorkingDirectory);
+        Assert.Equal("Launch Renamed App", defaultShortcut.Description);
+
+        viewModel.ShortcutDescription = "Start Renamed App";
+
+        var customShortcut = Assert.Single(viewModel.BuildDocument().Shortcuts);
+        Assert.Equal("Start Renamed App", customShortcut.Description);
+        Assert.Contains("description = 'Start Renamed App'", viewModel.TomlPreview);
+    }
+
+    [Fact]
+    public void Purge_registry_branches_track_registry_entries()
+    {
+        var viewModel = new MainViewModel(() => null)
+        {
+            ApplicationFolder = "RenamedApp"
+        };
+        viewModel.AddRegistry(@"HKLM\Software\Vendor\RenamedApp", "InstallRoot", @"{ProgramFilesX64}\RenamedApp");
+
+        var branches = viewModel.BuildDocument().Purge.RegistryBranches;
+
+        Assert.Contains(@"HKCU\Software\RenamedApp", branches);
+        Assert.Contains(@"HKLM\Software\Vendor\RenamedApp", branches);
+        Assert.Contains(@"HKLM\Software\Vendor\RenamedApp", viewModel.PurgeRegistryBranchesPreview);
+    }
+
+    [Fact]
     public void Packaging_is_disabled_when_covenant_setup_is_missing()
     {
         var viewModel = new MainViewModel(() => null);

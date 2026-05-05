@@ -51,17 +51,18 @@ The app edits the current manifest schema:
 - `purge`
 
 It keeps a live TOML preview, validates required fields locally, warns when a manifest appears to require elevation, and saves a TOML file through the Windows file picker.
+Shortcut path, target, and working directory values are generated from the Files entries; only the shortcut description is directly edited. Purge paths are generated from file destinations and path-like Registry values, and purge registry branches are generated from the Registry entries.
 
 ## Installer EXE Generation
 
-The Installer EXE section is enabled only when the app finds `covenant-setup.exe`. It checks:
+The **Installer Config** button opens installer generation settings. Automatic tool detection checks:
 
 - next to the authoring app
 - the current working directory
 - `target\release` and `target\debug` under nearby repo roots
 - directories on `PATH`
 
-When enabled, **Generate Installer EXE** writes the current TOML to the selected `${AppName}-install.toml` location and runs:
+If the tool is not found automatically, enter or browse to `covenant-setup.exe`; the app runs its `--help` command before accepting a manually selected path. The top-level **Save and Build** button is enabled when an installer engine is detected, writes the current TOML to the selected `${AppName}-install.toml` location, and runs:
 
 ```powershell
 covenant-setup.exe --json package <AppName>-install.toml --output <output-directory>

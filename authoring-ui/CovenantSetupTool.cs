@@ -11,6 +11,11 @@ internal sealed record PackageResult(
     string Output,
     string Error);
 
+internal sealed record ToolValidationResult(
+    bool IsValid,
+    CovenantSetupTool? Tool,
+    string Message);
+
 internal static class CovenantSetupToolLocator
 {
     public static CovenantSetupTool? Find()
@@ -78,6 +83,130 @@ internal static class CovenantSetupToolLocator
         {
             yield return current.FullName;
             current = current.Parent;
+        }
+    }
+}
+
+internal static class CovenantSetupToolValidator
+{
+    public static async Task<ToolValidationResult> ValidateAsync(
+        string path,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return Invalid("Pick a valid covenant-setup executable.");
+        }
+
+        string fullPath;
+        try
+        {
+            fullPath = System.IO.Path.GetFullPath(path.Trim());
+        }
+        catch (Exception ex)
+        {
+            return Invalid("The covenant-setup path is invalid: " + ex.Message);
+        }
+
+        if (!File.Exists(fullPath))
+        {
+            return Invalid("Pick a valid covenant-setup executable.");
+        }
+
+        var output = new StringBuilder();
+        var error = new StringBuilder();
+        using var process = new Process
+        {
+            StartInfo = CreateHelpStartInfo(fullPath),
+            EnableRaisingEvents = true
+        };
+
+        process.OutputDataReceived += (_, args) =>
+        {
+            if (args.Data is not null)
+            {
+                output.AppendLine(args.Data);
+            }
+        };
+        process.ErrorDataReceived += (_, args) =>
+        {
+            if (args.Data is not null)
+            {
+                error.AppendLine(args.Data);
+            }
+        };
+
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(5));
+
+        try
+        {
+            if (!process.Start())
+            {
+                return Invalid("Pick a valid covenant-setup executable.");
+            }
+
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
+            await process.WaitForExitAsync(timeout.Token);
+            process.WaitForExit();
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            TryKill(process);
+            return Invalid("The selected executable did not respond to the covenant-setup help command.");
+        }
+        catch (Exception ex)
+        {
+            return Invalid("The selected executable could not be started: " + ex.Message);
+        }
+
+        var combinedOutput = string.Join(
+            Environment.NewLine,
+            new[] { output.ToString(), error.ToString() }.Where(part => !string.IsNullOrWhiteSpace(part)));
+        if (process.ExitCode == 0 && LooksLikeCovenantSetupHelp(combinedOutput))
+        {
+            return new ToolValidationResult(true, new CovenantSetupTool(fullPath), "Packaging enabled: " + fullPath);
+        }
+
+        return Invalid("Pick a valid covenant-setup executable.");
+    }
+
+    private static ProcessStartInfo CreateHelpStartInfo(string path)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = path,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        startInfo.ArgumentList.Add("--help");
+        return startInfo;
+    }
+
+    private static bool LooksLikeCovenantSetupHelp(string output) =>
+        !string.IsNullOrWhiteSpace(output) &&
+        (output.Contains("covenant", StringComparison.OrdinalIgnoreCase) ||
+            (output.Contains("package", StringComparison.OrdinalIgnoreCase) &&
+                output.Contains("install", StringComparison.OrdinalIgnoreCase)));
+
+    private static ToolValidationResult Invalid(string message) =>
+        new(false, null, message);
+
+    private static void TryKill(Process process)
+    {
+        try
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+            }
+        }
+        catch
+        {
+            // Best effort; the caller reports validation failure either way.
         }
     }
 }

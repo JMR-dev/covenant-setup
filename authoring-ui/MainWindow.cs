@@ -3,6 +3,7 @@ using Microsoft.UI;
 using Microsoft.UI.Text;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Data;
 using Microsoft.UI.Xaml.Media;
@@ -24,7 +25,12 @@ internal sealed class MainWindow : Window
     private readonly List<TextBlock> _secondaryTextBlocks = [];
     private TextBlock _statusText = null!;
     private TextBlock _toolStatusText = null!;
+    private TextBlock _installerDialogMessageText = null!;
     private TextBox _previewBox = null!;
+    private Button _copyPreviewButton = null!;
+    private TextBox _covenantSetupPathBox = null!;
+    private Button _browseCovenantSetupButton = null!;
+    private Button _refreshToolButton = null!;
     private TextBox _outputDirectoryBox = null!;
     private Button _chooseOutputButton = null!;
     private Button _generateInstallerButton = null!;
@@ -32,8 +38,10 @@ internal sealed class MainWindow : Window
     private ToggleSwitch _themeToggle = null!;
     private string? _lastSavedManifestPath;
     private bool _isPackaging;
+    private int _copyPreviewFeedbackVersion;
     private bool _syncingThemeToggle;
     private bool _usingSystemTheme;
+    private bool _syncingCovenantSetupPath;
 
     public MainWindow()
     {
@@ -50,6 +58,7 @@ internal sealed class MainWindow : Window
             if (args.PropertyName is nameof(MainViewModel.HasCovenantSetupTool)
                 or nameof(MainViewModel.CanPackage)
                 or nameof(MainViewModel.CovenantSetupStatus)
+                or nameof(MainViewModel.CovenantSetupPath)
                 or nameof(MainViewModel.OutputDirectory))
             {
                 RefreshPackageControls();
@@ -143,18 +152,39 @@ internal sealed class MainWindow : Window
             Spacing = 8
         };
 
+        var themeControl = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            VerticalAlignment = VerticalAlignment.Center,
+            Spacing = 6
+        };
+        themeControl.Children.Add(new TextBlock
+        {
+            Text = "Light",
+            VerticalAlignment = VerticalAlignment.Center
+        });
+
         _themeToggle = new ToggleSwitch
         {
             OnContent = "Dark",
-            OffContent = "Light",
-            MinWidth = 96
+            OffContent = string.Empty,
+            MinWidth = 72
         };
         _themeToggle.Toggled += (_, _) => ToggleTheme();
-        actions.Children.Add(_themeToggle);
+        themeControl.Children.Add(_themeToggle);
+        actions.Children.Add(themeControl);
 
         var validateButton = new Button { Content = "Validate", MinWidth = 92 };
         validateButton.Click += async (_, _) => await ShowValidationAsync();
         actions.Children.Add(validateButton);
+
+        var installerConfigButton = new Button { Content = "Installer Config", MinWidth = 124 };
+        installerConfigButton.Click += async (_, _) => await ShowInstallerConfigAsync();
+        actions.Children.Add(installerConfigButton);
+
+        _generateInstallerButton = new Button { Content = "Save and Build", MinWidth = 124 };
+        _generateInstallerButton.Click += async (_, _) => await GenerateInstallerAsync();
+        actions.Children.Add(_generateInstallerButton);
 
         var saveButton = new Button { Content = "Save TOML", MinWidth = 104 };
         saveButton.Click += async (_, _) => await SaveManifestAsync();
@@ -169,13 +199,11 @@ internal sealed class MainWindow : Window
     {
         var stack = new StackPanel { Spacing = 12 };
         stack.Children.Add(BuildAppSection());
-        stack.Children.Add(BuildPackageSection());
         stack.Children.Add(BuildDirectoriesSection());
         stack.Children.Add(BuildFilesSection());
         stack.Children.Add(BuildRegistrySection());
         stack.Children.Add(BuildShortcutsSection());
         stack.Children.Add(BuildScriptsSection());
-        stack.Children.Add(BuildPurgeSection());
 
         return new ScrollViewer
         {
@@ -202,10 +230,11 @@ internal sealed class MainWindow : Window
             VerticalAlignment = VerticalAlignment.Center
         });
 
-        var copyButton = new Button { Content = "Copy", MinWidth = 80 };
-        copyButton.Click += async (_, _) => await CopyPreviewAsync();
-        Grid.SetColumn(copyButton, 1);
-        header.Children.Add(copyButton);
+        _copyPreviewButton = new Button { Content = "Copy", MinWidth = 80 };
+        AutomationProperties.SetName(_copyPreviewButton, "Copy TOML preview");
+        _copyPreviewButton.Click += async (_, _) => await CopyPreviewAsync();
+        Grid.SetColumn(_copyPreviewButton, 1);
+        header.Children.Add(_copyPreviewButton);
 
         Grid.SetRow(header, 0);
         preview.Children.Add(header);
@@ -262,7 +291,7 @@ internal sealed class MainWindow : Window
             Labeled("Primary Payload", payloadBox));
     }
 
-    private FrameworkElement BuildPackageSection()
+    private FrameworkElement BuildInstallerConfigContent()
     {
         _toolStatusText = new TextBlock
         {
@@ -276,28 +305,52 @@ internal sealed class MainWindow : Window
                 Mode = BindingMode.OneWay
             });
 
+        _covenantSetupPathBox = new TextBox
+        {
+            PlaceholderText = @"C:\path\to\covenant-setup.exe",
+            Text = _viewModel.CovenantSetupPath
+        };
+        _covenantSetupPathBox.TextChanged += (_, _) =>
+        {
+            if (_syncingCovenantSetupPath)
+            {
+                return;
+            }
+
+            if (!string.Equals(_covenantSetupPathBox.Text, _viewModel.CovenantSetupPath, StringComparison.OrdinalIgnoreCase))
+            {
+                _viewModel.RejectCovenantSetupTool("covenant-setup.exe was not validated. Packaging is disabled.");
+            }
+        };
+        _covenantSetupPathBox.LostFocus += async (_, _) => await ValidateTypedCovenantSetupPathAsync(showInvalidMessage: true);
+
+        _browseCovenantSetupButton = new Button
+        {
+            Content = "Browse",
+            Width = 96
+        };
+        _browseCovenantSetupButton.Click += async (_, _) => await BrowseCovenantSetupPathAsync();
+
         _outputDirectoryBox = BoundTextBox(nameof(MainViewModel.OutputDirectory), @"C:\path\to\dist");
 
         _chooseOutputButton = new Button
         {
             Content = "Choose",
-            MinWidth = 84
+            Width = 96
         };
         _chooseOutputButton.Click += async (_, _) => await ChooseOutputDirectoryAsync();
 
-        var refreshButton = new Button
+        _refreshToolButton = new Button
         {
             Content = "Refresh Tool Check",
-            MinWidth = 140
+            Width = 156
         };
-        refreshButton.Click += (_, _) => _viewModel.RefreshCovenantSetupTool();
-
-        _generateInstallerButton = new Button
+        _refreshToolButton.Click += (_, _) =>
         {
-            Content = "Generate Installer EXE",
-            MinWidth = 168
+            _viewModel.RefreshCovenantSetupTool();
+            SyncCovenantSetupPathBox();
+            SetInstallerDialogMessage(string.Empty);
         };
-        _generateInstallerButton.Click += async (_, _) => await GenerateInstallerAsync();
 
         var actionRow = new StackPanel
         {
@@ -305,14 +358,28 @@ internal sealed class MainWindow : Window
             HorizontalAlignment = HorizontalAlignment.Right,
             Spacing = 8
         };
-        actionRow.Children.Add(refreshButton);
-        actionRow.Children.Add(_generateInstallerButton);
+        actionRow.Children.Add(_refreshToolButton);
 
-        return Section(
-            "Installer EXE",
-            _toolStatusText,
-            Labeled("Output Directory", InputRow(_outputDirectoryBox, _chooseOutputButton)),
-            actionRow);
+        _installerDialogMessageText = new TextBlock
+        {
+            TextWrapping = TextWrapping.Wrap,
+            MaxLines = 6
+        };
+        _secondaryTextBlocks.Add(_installerDialogMessageText);
+
+        var stack = new StackPanel
+        {
+            Spacing = 10,
+            MinWidth = 640,
+            HorizontalAlignment = HorizontalAlignment.Stretch
+        };
+        stack.Children.Add(_toolStatusText);
+        stack.Children.Add(DialogFieldGrid(
+            ("Covenant Setup Executable", _covenantSetupPathBox, _browseCovenantSetupButton),
+            ("Output Directory", _outputDirectoryBox, _chooseOutputButton)));
+        stack.Children.Add(actionRow);
+        stack.Children.Add(_installerDialogMessageText);
+        return stack;
     }
 
     private FrameworkElement BuildDirectoriesSection()
@@ -391,41 +458,11 @@ internal sealed class MainWindow : Window
 
     private FrameworkElement BuildShortcutsSection()
     {
-        var pathBox = new TextBox { PlaceholderText = @"{Desktop}\VendorApp.lnk" };
-        var targetBox = new TextBox { PlaceholderText = @"{LocalAppData}\Vendor\App\bin\app.exe" };
-        var argumentsBox = new TextBox { PlaceholderText = "--optional" };
-        var workingDirectoryBox = new TextBox { PlaceholderText = @"{LocalAppData}\Vendor\App" };
-        var descriptionBox = new TextBox { PlaceholderText = "Launch application" };
-        var rows = RemovableRows(_viewModel.Shortcuts);
-        var addButton = new Button { Content = "Add", MinWidth = 72 };
-        addButton.Click += async (_, _) =>
-        {
-            if (string.IsNullOrWhiteSpace(pathBox.Text) || string.IsNullOrWhiteSpace(targetBox.Text))
-            {
-                await ShowNoticeAsync("Shortcut Entry", "Path and target are required.");
-                return;
-            }
-
-            _viewModel.AddShortcut(
-                pathBox.Text,
-                targetBox.Text,
-                argumentsBox.Text,
-                workingDirectoryBox.Text,
-                descriptionBox.Text);
-            pathBox.Text = string.Empty;
-            targetBox.Text = string.Empty;
-            argumentsBox.Text = string.Empty;
-            workingDirectoryBox.Text = string.Empty;
-            descriptionBox.Text = string.Empty;
-        };
+        var descriptionBox = BoundTextBox(nameof(MainViewModel.ShortcutDescription), "Launch application");
 
         return Section(
             "Shortcuts",
-            TwoColumn(Labeled("Path", pathBox), Labeled("Target", targetBox)),
-            TwoColumn(Labeled("Arguments", argumentsBox), Labeled("Working Directory", workingDirectoryBox)),
-            Labeled("Description", descriptionBox),
-            AlignRight(addButton),
-            rows);
+            Labeled("Description", descriptionBox));
     }
 
     private FrameworkElement BuildScriptsSection()
@@ -466,33 +503,44 @@ internal sealed class MainWindow : Window
             rows);
     }
 
-    private FrameworkElement BuildPurgeSection()
+    private async Task ShowInstallerConfigAsync()
     {
-        var pathBox = new TextBox { PlaceholderText = @"{LocalAppData}\Vendor\App" };
-        var branchBox = new TextBox { PlaceholderText = @"HKCU\Software\VendorApp" };
-        var pathRows = RemovableRows(_viewModel.PurgePaths);
-        var branchRows = RemovableRows(_viewModel.PurgeRegistryBranches);
-
-        var addPathButton = new Button { Content = "Add Path", MinWidth = 96 };
-        addPathButton.Click += (_, _) =>
+        var dialog = new ContentDialog
         {
-            _viewModel.AddPurgePath(pathBox.Text);
-            pathBox.Text = string.Empty;
+            Title = "Installer Config",
+            CloseButtonText = "Close",
+            Width = 1080,
+            MinWidth = 1080,
+            Content = BuildInstallerConfigContent()
         };
 
-        var addBranchButton = new Button { Content = "Add Branch", MinWidth = 104 };
-        addBranchButton.Click += (_, _) =>
+        if (Content is FrameworkElement root)
         {
-            _viewModel.AddPurgeRegistryBranch(branchBox.Text);
-            branchBox.Text = string.Empty;
+            dialog.XamlRoot = root.XamlRoot;
+        }
+
+        dialog.Closing += (_, args) =>
+        {
+            if (_isPackaging)
+            {
+                args.Cancel = true;
+            }
         };
 
-        return Section(
-            "Purge",
-            Labeled("Path", InputRow(pathBox, addPathButton)),
-            pathRows,
-            Labeled("Registry Branch", InputRow(branchBox, addBranchButton)),
-            branchRows);
+        RefreshPackageControls();
+        _ = await dialog.ShowAsync();
+
+        if (_installerDialogMessageText is not null)
+        {
+            _secondaryTextBlocks.Remove(_installerDialogMessageText);
+        }
+        _toolStatusText = null!;
+        _installerDialogMessageText = null!;
+        _covenantSetupPathBox = null!;
+        _browseCovenantSetupButton = null!;
+        _refreshToolButton = null!;
+        _outputDirectoryBox = null!;
+        _chooseOutputButton = null!;
     }
 
     private async Task SaveManifestAsync()
@@ -506,10 +554,17 @@ internal sealed class MainWindow : Window
 
     private async Task<string?> WriteManifestWithPickerAsync(bool showNotice)
     {
+        return await WriteManifestWithPickerAsync(showNotice, ShowNoticeAsync);
+    }
+
+    private async Task<string?> WriteManifestWithPickerAsync(
+        bool showNotice,
+        Func<string, string, Task> showMessageAsync)
+    {
         var validation = _viewModel.Validate();
         if (!validation.IsValid)
         {
-            await ShowNoticeAsync("Validation", string.Join(Environment.NewLine, validation.Errors));
+            await showMessageAsync("Validation", string.Join(Environment.NewLine, validation.Errors));
             return null;
         }
 
@@ -524,7 +579,7 @@ internal sealed class MainWindow : Window
             await File.WriteAllTextAsync(_lastSavedManifestPath, _viewModel.TomlPreview);
             if (showNotice)
             {
-                await ShowNoticeAsync("Manifest Saved", _lastSavedManifestPath);
+                await showMessageAsync("Manifest Saved", _lastSavedManifestPath);
             }
             return _lastSavedManifestPath;
         }
@@ -543,7 +598,7 @@ internal sealed class MainWindow : Window
 
         if (!_viewModel.IsExpectedManifestPath(file.Path))
         {
-            await ShowNoticeAsync(
+            await showMessageAsync(
                 "Manifest File Name",
                 MainViewModel.ContainsWhitespace(file.Path)
                     ? "The manifest path cannot contain spaces. Save the manifest as " + _viewModel.ExpectedManifestFileName + " in a folder path without spaces."
@@ -554,9 +609,84 @@ internal sealed class MainWindow : Window
         await FileIO.WriteTextAsync(file, _viewModel.TomlPreview);
         if (showNotice)
         {
-            await ShowNoticeAsync("Manifest Saved", file.Path);
+            await showMessageAsync("Manifest Saved", file.Path);
         }
         return file.Path;
+    }
+
+    private async Task BrowseCovenantSetupPathAsync()
+    {
+        var picker = new FileOpenPicker();
+        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+        picker.SuggestedStartLocation = PickerLocationId.ComputerFolder;
+        picker.FileTypeFilter.Add(".exe");
+
+        var file = await picker.PickSingleFileAsync();
+        if (file is not null)
+        {
+            await AcceptCovenantSetupPathAsync(file.Path, showInvalidMessage: true);
+        }
+    }
+
+    private async Task ValidateTypedCovenantSetupPathAsync(bool showInvalidMessage)
+    {
+        if (_covenantSetupPathBox is null)
+        {
+            return;
+        }
+
+        var path = _covenantSetupPathBox.Text.Trim();
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            _viewModel.RejectCovenantSetupTool("covenant-setup.exe was not found. Packaging is disabled.");
+            SetInstallerDialogMessage(string.Empty);
+            return;
+        }
+
+        if (string.Equals(path, _viewModel.CovenantSetupPath, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        await AcceptCovenantSetupPathAsync(path, showInvalidMessage);
+    }
+
+    private async Task<bool> AcceptCovenantSetupPathAsync(string path, bool showInvalidMessage)
+    {
+        SetInstallerDialogMessage("Checking covenant-setup...");
+        var result = await CovenantSetupToolValidator.ValidateAsync(path, CancellationToken.None);
+        if (result.IsValid && result.Tool is not null)
+        {
+            _viewModel.SetCovenantSetupTool(result.Tool);
+            SyncCovenantSetupPathBox();
+            SetInstallerDialogMessage(string.Empty);
+            return true;
+        }
+
+        _viewModel.RejectCovenantSetupTool(result.Message);
+        if (showInvalidMessage)
+        {
+            SetInstallerDialogMessage(result.Message + " Run the help check by selecting the real covenant-setup.exe.");
+        }
+        return false;
+    }
+
+    private void SyncCovenantSetupPathBox()
+    {
+        if (_covenantSetupPathBox is null)
+        {
+            return;
+        }
+
+        _syncingCovenantSetupPath = true;
+        try
+        {
+            _covenantSetupPathBox.Text = _viewModel.CovenantSetupPath;
+        }
+        finally
+        {
+            _syncingCovenantSetupPath = false;
+        }
     }
 
     private async Task ChooseOutputDirectoryAsync()
@@ -573,29 +703,30 @@ internal sealed class MainWindow : Window
         }
     }
 
-    private async Task GenerateInstallerAsync()
+    private async Task GenerateInstallerAsync(Func<string, string, Task>? showMessageAsync = null)
     {
+        showMessageAsync ??= ShowNoticeAsync;
         var tool = _viewModel.CovenantSetupTool;
         if (tool is null)
         {
-            await ShowNoticeAsync("Installer EXE", "covenant-setup.exe was not found. Packaging is disabled.");
+            await showMessageAsync("Installer EXE", "covenant-setup.exe was not found. Packaging is disabled.");
             return;
         }
 
         var validation = _viewModel.Validate();
         if (!validation.IsValid)
         {
-            await ShowNoticeAsync("Validation", string.Join(Environment.NewLine, validation.Errors));
+            await showMessageAsync("Validation", string.Join(Environment.NewLine, validation.Errors));
             return;
         }
 
         if (string.IsNullOrWhiteSpace(_viewModel.OutputDirectory))
         {
-            await ShowNoticeAsync("Installer EXE", "Choose an output directory before packaging.");
+            await showMessageAsync("Installer EXE", "Choose an output directory before packaging.");
             return;
         }
 
-        var manifestPath = await WriteManifestWithPickerAsync(showNotice: false);
+        var manifestPath = await WriteManifestWithPickerAsync(showNotice: false, showMessageAsync);
         if (manifestPath is null)
         {
             return;
@@ -618,11 +749,11 @@ internal sealed class MainWindow : Window
             var detail = string.Join(
                 Environment.NewLine + Environment.NewLine,
                 new[] { message, result.Output, result.Error }.Where(part => !string.IsNullOrWhiteSpace(part)));
-            await ShowNoticeAsync("Installer EXE", detail);
+            await showMessageAsync("Installer EXE", detail);
         }
         catch (Exception ex)
         {
-            await ShowNoticeAsync("Installer EXE", "Packaging failed: " + ex.Message);
+            await showMessageAsync("Installer EXE", "Packaging failed: " + ex.Message);
         }
         finally
         {
@@ -647,7 +778,40 @@ internal sealed class MainWindow : Window
         var data = new DataPackage();
         data.SetText(_viewModel.TomlPreview);
         Clipboard.SetContent(data);
-        await ShowNoticeAsync("TOML Preview", "Copied to clipboard.");
+        await ShowCopyPreviewCopiedAsync();
+    }
+
+    private async Task ShowCopyPreviewCopiedAsync()
+    {
+        var version = ++_copyPreviewFeedbackVersion;
+        var brushes = CreateThemeBrushes();
+
+        _copyPreviewButton.Content = new FontIcon
+        {
+            FontFamily = new FontFamily("Segoe MDL2 Assets"),
+            FontSize = 16,
+            Glyph = "\uE8FB",
+            Foreground = brushes.SuccessText
+        };
+        AutomationProperties.SetName(_copyPreviewButton, "Copied");
+
+        await Task.Delay(TimeSpan.FromSeconds(1));
+
+        if (version != _copyPreviewFeedbackVersion)
+        {
+            return;
+        }
+
+        _copyPreviewButton.Content = "Copy";
+        AutomationProperties.SetName(_copyPreviewButton, "Copy TOML preview");
+    }
+
+    private void SetInstallerDialogMessage(string message)
+    {
+        if (_installerDialogMessageText is not null)
+        {
+            _installerDialogMessageText.Text = message;
+        }
     }
 
     private async Task ShowNoticeAsync(string title, string message)
@@ -760,20 +924,39 @@ internal sealed class MainWindow : Window
 
     private void RefreshPackageControls()
     {
-        if (_generateInstallerButton is null)
+        var controlsAvailable = !_isPackaging;
+        if (_covenantSetupPathBox is not null)
         {
-            return;
+            _covenantSetupPathBox.IsEnabled = controlsAvailable;
         }
-
-        var toolAvailable = _viewModel.HasCovenantSetupTool && !_isPackaging;
-        _outputDirectoryBox.IsEnabled = toolAvailable;
-        _chooseOutputButton.IsEnabled = toolAvailable;
-        _generateInstallerButton.IsEnabled = _viewModel.CanPackage && !_isPackaging;
-        _generateInstallerButton.Content = _isPackaging ? "Generating..." : "Generate Installer EXE";
+        if (_browseCovenantSetupButton is not null)
+        {
+            _browseCovenantSetupButton.IsEnabled = controlsAvailable;
+        }
+        if (_refreshToolButton is not null)
+        {
+            _refreshToolButton.IsEnabled = controlsAvailable;
+        }
+        if (_outputDirectoryBox is not null)
+        {
+            _outputDirectoryBox.IsEnabled = controlsAvailable;
+        }
+        if (_chooseOutputButton is not null)
+        {
+            _chooseOutputButton.IsEnabled = controlsAvailable;
+        }
+        if (_generateInstallerButton is not null)
+        {
+            _generateInstallerButton.IsEnabled = _viewModel.HasCovenantSetupTool && !_isPackaging;
+            _generateInstallerButton.Content = _isPackaging ? "Building..." : "Save and Build";
+        }
         var brushes = CreateThemeBrushes();
-        _toolStatusText.Foreground = _viewModel.HasCovenantSetupTool
-            ? brushes.SuccessText
-            : brushes.ErrorText;
+        if (_toolStatusText is not null)
+        {
+            _toolStatusText.Foreground = _viewModel.HasCovenantSetupTool
+                ? brushes.SuccessText
+                : brushes.ErrorText;
+        }
     }
 
     private void ApplyThemeBrushes()
@@ -925,7 +1108,11 @@ internal sealed class MainWindow : Window
 
     private static FrameworkElement Labeled(string label, FrameworkElement control)
     {
-        var stack = new StackPanel { Spacing = 2 };
+        var stack = new StackPanel
+        {
+            Spacing = 2,
+            HorizontalAlignment = HorizontalAlignment.Stretch
+        };
         stack.Children.Add(new TextBlock
         {
             Text = label,
@@ -934,6 +1121,47 @@ internal sealed class MainWindow : Window
         });
         stack.Children.Add(control);
         return stack;
+    }
+
+    private static Grid DialogFieldGrid(params (string Label, TextBox TextBox, Button Button)[] fields)
+    {
+        var grid = new Grid
+        {
+            ColumnSpacing = 6,
+            RowSpacing = 2,
+            HorizontalAlignment = HorizontalAlignment.Stretch
+        };
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+        for (var index = 0; index < fields.Length; index++)
+        {
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+            var label = new TextBlock
+            {
+                Text = fields[index].Label,
+                FontWeight = FontWeights.SemiBold,
+                FontSize = 12
+            };
+            Grid.SetRow(label, index * 2);
+            Grid.SetColumn(label, 0);
+            grid.Children.Add(label);
+
+            fields[index].TextBox.HorizontalAlignment = HorizontalAlignment.Stretch;
+            Grid.SetRow(fields[index].TextBox, (index * 2) + 1);
+            Grid.SetColumn(fields[index].TextBox, 0);
+            grid.Children.Add(fields[index].TextBox);
+
+            fields[index].Button.HorizontalAlignment = HorizontalAlignment.Left;
+            fields[index].Button.VerticalAlignment = VerticalAlignment.Bottom;
+            Grid.SetRow(fields[index].Button, (index * 2) + 1);
+            Grid.SetColumn(fields[index].Button, 1);
+            grid.Children.Add(fields[index].Button);
+        }
+
+        return grid;
     }
 
     private static Grid TwoColumn(FrameworkElement left, FrameworkElement right)
@@ -951,8 +1179,11 @@ internal sealed class MainWindow : Window
     private static Grid InputRow(TextBox textBox, Button button)
     {
         var grid = new Grid { ColumnSpacing = 6 };
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(9, GridUnitType.Star) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(7, GridUnitType.Star) });
+        grid.HorizontalAlignment = HorizontalAlignment.Stretch;
+        textBox.HorizontalAlignment = HorizontalAlignment.Stretch;
+        button.HorizontalAlignment = HorizontalAlignment.Right;
         Grid.SetColumn(textBox, 0);
         Grid.SetColumn(button, 1);
         grid.Children.Add(textBox);

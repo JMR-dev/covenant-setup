@@ -13,6 +13,7 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
     private string _applicationFolder = "CovenantSetupSample";
     private string _primaryPayload = @"payload\sample_app.cmd";
     private string _outputDirectory = Path.Combine(Environment.CurrentDirectory, "dist");
+    private string? _shortcutDescriptionOverride;
     private CovenantSetupTool? _covenantSetupTool;
     private string _covenantSetupStatus = "covenant-setup.exe was not found. Packaging is disabled.";
     private string _tomlPreview = string.Empty;
@@ -69,6 +70,29 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
         set => SetProperty(ref _primaryPayload, value);
     }
 
+    public string ShortcutDescription
+    {
+        get => EffectiveShortcutDescription();
+        set
+        {
+            var normalized = string.IsNullOrWhiteSpace(value) ? null : value;
+            var defaultDescription = DefaultShortcutDescription(AppName.Trim());
+            var overrideValue = string.Equals(normalized, defaultDescription, StringComparison.Ordinal)
+                ? null
+                : normalized;
+
+            if (string.Equals(_shortcutDescriptionOverride, overrideValue, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _shortcutDescriptionOverride = overrideValue;
+            OnPropertyChanged();
+            NotifyGeneratedManifestFieldsChanged();
+            RefreshPreview();
+        }
+    }
+
     public string OutputDirectory
     {
         get => _outputDirectory;
@@ -83,12 +107,15 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
             if (SetProperty(ref _covenantSetupTool, value, refreshPreview: false))
             {
                 PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(HasCovenantSetupTool)));
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CovenantSetupPath)));
                 PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CanPackage)));
             }
         }
     }
 
     public bool HasCovenantSetupTool => CovenantSetupTool is not null;
+
+    public string CovenantSetupPath => CovenantSetupTool?.Path ?? string.Empty;
 
     public string CovenantSetupStatus
     {
@@ -125,6 +152,16 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
         }
     }
 
+    public string ShortcutPath => GeneratedShortcut()?.Path ?? string.Empty;
+
+    public string ShortcutTarget => GeneratedShortcut()?.Target ?? string.Empty;
+
+    public string ShortcutWorkingDirectory => GeneratedShortcut()?.WorkingDirectory ?? string.Empty;
+
+    public string PurgePathsPreview => JoinLines(BuildDocument().Purge.Paths);
+
+    public string PurgeRegistryBranchesPreview => JoinLines(BuildDocument().Purge.RegistryBranches);
+
     public ObservableCollection<string> Directories { get; } = [];
     public ObservableCollection<FileSpec> Files { get; } = [];
     public ObservableCollection<RegistrySpec> Registry { get; } = [];
@@ -135,10 +172,21 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
 
     public void RefreshCovenantSetupTool()
     {
-        CovenantSetupTool = _locateCovenantSetupTool();
+        SetCovenantSetupTool(_locateCovenantSetupTool());
+    }
+
+    public void SetCovenantSetupTool(CovenantSetupTool? tool)
+    {
+        CovenantSetupTool = tool;
         CovenantSetupStatus = CovenantSetupTool is null
             ? "covenant-setup.exe was not found. Packaging is disabled."
             : "Packaging enabled: " + CovenantSetupTool.Path;
+    }
+
+    public void RejectCovenantSetupTool(string message)
+    {
+        CovenantSetupTool = null;
+        CovenantSetupStatus = message;
     }
 
     public void AddDirectory(string path)
@@ -206,18 +254,23 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
     public ManifestDocument BuildDocument()
     {
         var template = BuildTemplateEntries();
+        var directories = CombineUnique(template.Directories, Directories);
+        var files = CombineUnique(template.Files, Files);
+        var registry = CombineUnique(template.Registry, Registry);
+        var shortcuts = CombineUnique(BuildShortcutEntries(files), Shortcuts);
+        var purgePaths = CombineUnique(BuildPurgePaths(files, registry), PurgePaths);
         return new ManifestDocument
         {
             AppName = AppName.Trim(),
-            Directories = CombineUnique(template.Directories, Directories),
-            Files = CombineUnique(template.Files, Files),
-            Registry = CombineUnique(template.Registry, Registry),
-            Shortcuts = CombineUnique(template.Shortcuts, Shortcuts),
+            Directories = directories,
+            Files = files,
+            Registry = registry,
+            Shortcuts = shortcuts,
             Scripts = Scripts.ToArray(),
             Purge = new PurgeSpec
             {
-                Paths = CombineUnique(template.PurgePaths, PurgePaths),
-                RegistryBranches = CombineUnique(template.PurgeRegistryBranches, PurgeRegistryBranches)
+                Paths = purgePaths,
+                RegistryBranches = CombineUnique(registry.Select(entry => entry.Key), PurgeRegistryBranches)
             }
         };
     }
@@ -308,15 +361,22 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
         }
 
         field = value;
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        OnPropertyChanged(propertyName);
         if (propertyName == nameof(AppName))
         {
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ExpectedManifestFileName)));
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ManifestSubtitle)));
+            OnPropertyChanged(nameof(ExpectedManifestFileName));
+            OnPropertyChanged(nameof(ManifestSubtitle));
         }
         if (propertyName == nameof(OutputDirectory))
         {
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CanPackage)));
+            OnPropertyChanged(nameof(CanPackage));
+        }
+        if (propertyName is nameof(AppName)
+            or nameof(InstallRootToken)
+            or nameof(ApplicationFolder)
+            or nameof(PrimaryPayload))
+        {
+            NotifyGeneratedManifestFieldsChanged();
         }
         if (refreshPreview)
         {
@@ -327,7 +387,41 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
 
     private void CollectionChanged(object? sender, NotifyCollectionChangedEventArgs args)
     {
+        if (ReferenceEquals(sender, Files))
+        {
+            OnPropertyChanged(nameof(ShortcutPath));
+            OnPropertyChanged(nameof(ShortcutTarget));
+            OnPropertyChanged(nameof(ShortcutWorkingDirectory));
+            OnPropertyChanged(nameof(PurgePathsPreview));
+        }
+        if (ReferenceEquals(sender, Registry) || ReferenceEquals(sender, PurgePaths))
+        {
+            OnPropertyChanged(nameof(PurgePathsPreview));
+        }
+        if (ReferenceEquals(sender, Registry) || ReferenceEquals(sender, PurgeRegistryBranches))
+        {
+            OnPropertyChanged(nameof(PurgeRegistryBranchesPreview));
+        }
+
         RefreshPreview();
+    }
+
+    private void NotifyGeneratedManifestFieldsChanged()
+    {
+        OnPropertyChanged(nameof(ShortcutDescription));
+        OnPropertyChanged(nameof(ShortcutPath));
+        OnPropertyChanged(nameof(ShortcutTarget));
+        OnPropertyChanged(nameof(ShortcutWorkingDirectory));
+        OnPropertyChanged(nameof(PurgePathsPreview));
+        OnPropertyChanged(nameof(PurgeRegistryBranchesPreview));
+    }
+
+    private void OnPropertyChanged([CallerMemberName] string? propertyName = null)
+    {
+        if (propertyName is not null)
+        {
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        }
     }
 
     private static void AddTrimmed<T>(
@@ -351,6 +445,154 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
 
     private static string? NullIfWhiteSpace(string? value) =>
         string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    private string EffectiveShortcutDescription() =>
+        _shortcutDescriptionOverride ?? DefaultShortcutDescription(AppName.Trim());
+
+    private string ManifestShortcutDescription() =>
+        NullIfWhiteSpace(EffectiveShortcutDescription()) ?? DefaultShortcutDescription(AppName.Trim());
+
+    private static string DefaultShortcutDescription(string appName) =>
+        string.IsNullOrWhiteSpace(appName) ? "Launch application" : "Launch " + appName;
+
+    private ShortcutSpec? GeneratedShortcut()
+    {
+        var template = BuildTemplateEntries();
+        var files = CombineUnique(template.Files, Files);
+        return BuildShortcutEntries(files).FirstOrDefault();
+    }
+
+    private static string JoinLines(IEnumerable<string> values) =>
+        string.Join(Environment.NewLine, values);
+
+    private IReadOnlyList<ShortcutSpec> BuildShortcutEntries(IReadOnlyList<FileSpec> files)
+    {
+        var target = files
+            .Select(file => file.Destination.Trim())
+            .FirstOrDefault(destination => !string.IsNullOrWhiteSpace(destination));
+
+        if (string.IsNullOrWhiteSpace(target))
+        {
+            return [];
+        }
+
+        return
+        [
+            new ShortcutSpec(
+                @"{Desktop}\" + ShortcutFileName(target) + ".lnk",
+                target,
+                null,
+                ParentPath(target),
+                ManifestShortcutDescription())
+        ];
+    }
+
+    private static IReadOnlyList<string> BuildPurgePaths(
+        IReadOnlyList<FileSpec> files,
+        IReadOnlyList<RegistrySpec> registry)
+    {
+        var candidates = new List<string>();
+        foreach (var entry in registry)
+        {
+            var value = entry.Value.Trim();
+            if (IsManifestPath(value) && !IsUnsafePurgeRoot(value))
+            {
+                candidates.Add(value);
+            }
+        }
+
+        foreach (var file in files)
+        {
+            var parent = ParentPath(file.Destination);
+            if (!string.IsNullOrWhiteSpace(parent) && !IsUnsafePurgeRoot(parent))
+            {
+                candidates.Add(parent);
+            }
+        }
+
+        return RemoveCoveredChildPaths(CombineUnique(candidates, Array.Empty<string>()));
+    }
+
+    private string ShortcutFileName(string target)
+    {
+        var fileName = FileNameWithoutExtension(target);
+        var sanitized = SanitizeIdentifier(fileName);
+        if (!string.IsNullOrWhiteSpace(sanitized))
+        {
+            return sanitized;
+        }
+
+        var fallbackName = string.IsNullOrWhiteSpace(ApplicationFolder)
+            ? AppName
+            : ApplicationFolder;
+        return SanitizeIdentifier(fallbackName);
+    }
+
+    private static string FileNameWithoutExtension(string path)
+    {
+        var fileName = path.Trim().TrimEnd('\\');
+        var separatorIndex = fileName.LastIndexOf('\\');
+        if (separatorIndex >= 0 && separatorIndex < fileName.Length - 1)
+        {
+            fileName = fileName[(separatorIndex + 1)..];
+        }
+
+        var extensionIndex = fileName.LastIndexOf('.');
+        return extensionIndex > 0 ? fileName[..extensionIndex] : fileName;
+    }
+
+    private static string? ParentPath(string path)
+    {
+        var trimmed = path.Trim().TrimEnd('\\');
+        var separatorIndex = trimmed.LastIndexOf('\\');
+        if (separatorIndex < 0)
+        {
+            return null;
+        }
+
+        if (separatorIndex == 2 && trimmed[1] == ':')
+        {
+            return trimmed[..(separatorIndex + 1)];
+        }
+
+        return separatorIndex == 0 ? null : trimmed[..separatorIndex];
+    }
+
+    private static bool IsManifestPath(string value) =>
+        ManifestTokens.KnownPathTokens.Any(token =>
+            value.StartsWith(token + @"\", StringComparison.OrdinalIgnoreCase)) ||
+        Path.IsPathRooted(value);
+
+    private static bool IsUnsafePurgeRoot(string value)
+    {
+        var normalized = value.Trim().TrimEnd('\\');
+        if (ManifestTokens.KnownPathTokens.Any(token =>
+            string.Equals(normalized, token, StringComparison.OrdinalIgnoreCase)))
+        {
+            return true;
+        }
+
+        return normalized.Length == 2 &&
+            normalized[1] == ':' &&
+            IsAsciiLetter(normalized[0]);
+    }
+
+    private static bool IsAsciiLetter(char value) =>
+        value is >= 'A' and <= 'Z' or >= 'a' and <= 'z';
+
+    private static IReadOnlyList<string> RemoveCoveredChildPaths(IReadOnlyList<string> paths) =>
+        paths
+            .Where(path => !paths.Any(parent =>
+                !string.Equals(parent, path, StringComparison.OrdinalIgnoreCase) &&
+                IsParentPath(parent, path)))
+            .ToArray();
+
+    private static bool IsParentPath(string parent, string child)
+    {
+        var normalizedParent = parent.TrimEnd('\\');
+        return child.Length > normalizedParent.Length &&
+            child.StartsWith(normalizedParent + "\\", StringComparison.OrdinalIgnoreCase);
+    }
 
     private static bool IsSupportedRegistryRoot(string value) =>
         value.StartsWith(@"HKCU\", StringComparison.OrdinalIgnoreCase) ||
@@ -461,7 +703,6 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
         var root = InstallRootToken.TrimEnd('\\') + "\\" + folder;
         var registryBranch = @"HKCU\Software\" + folder;
         var files = new List<FileSpec>();
-        var shortcuts = new List<ShortcutSpec>();
 
         if (!string.IsNullOrWhiteSpace(PrimaryPayload))
         {
@@ -471,22 +712,13 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
             {
                 var destination = root + @"\bin\" + fileName;
                 files.Add(new FileSpec(source, destination));
-                shortcuts.Add(new ShortcutSpec(
-                    @"{Desktop}\" + folder + ".lnk",
-                    destination,
-                    null,
-                    root,
-                    "Launch " + appName));
             }
         }
 
         return new TemplateManifestEntries(
             [root, root + @"\bin"],
             files,
-            [new RegistrySpec(registryBranch, "InstallRoot", root)],
-            shortcuts,
-            [root],
-            [registryBranch]);
+            [new RegistrySpec(registryBranch, "InstallRoot", root)]);
     }
 
     private static IReadOnlyList<T> CombineUnique<T>(IEnumerable<T> first, IEnumerable<T> second)
@@ -506,8 +738,5 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
     private sealed record TemplateManifestEntries(
         IReadOnlyList<string> Directories,
         IReadOnlyList<FileSpec> Files,
-        IReadOnlyList<RegistrySpec> Registry,
-        IReadOnlyList<ShortcutSpec> Shortcuts,
-        IReadOnlyList<string> PurgePaths,
-        IReadOnlyList<string> PurgeRegistryBranches);
+        IReadOnlyList<RegistrySpec> Registry);
 }
