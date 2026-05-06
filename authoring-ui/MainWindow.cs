@@ -20,19 +20,13 @@ namespace Covenant.Setup.Authoring;
 internal sealed class MainWindow : Window
 {
     private readonly MainViewModel _viewModel = new();
+    private readonly InstallerConfigViewModel _installerConfigViewModel = new();
     private readonly List<Border> _sectionBorders = [];
     private readonly List<Border> _rowBorders = [];
     private readonly List<TextBlock> _secondaryTextBlocks = [];
     private TextBlock _statusText = null!;
-    private TextBlock _toolStatusText = null!;
-    private TextBlock _installerDialogMessageText = null!;
     private TextBox _previewBox = null!;
     private Button _copyPreviewButton = null!;
-    private TextBox _covenantSetupPathBox = null!;
-    private Button _browseCovenantSetupButton = null!;
-    private Button _refreshToolButton = null!;
-    private TextBox _outputDirectoryBox = null!;
-    private Button _chooseOutputButton = null!;
     private Button _generateInstallerButton = null!;
     private Grid _rootGrid = null!;
     private ToggleSwitch _themeToggle = null!;
@@ -41,7 +35,6 @@ internal sealed class MainWindow : Window
     private int _copyPreviewFeedbackVersion;
     private bool _syncingThemeToggle;
     private bool _usingSystemTheme;
-    private bool _syncingCovenantSetupPath;
 
     public MainWindow()
     {
@@ -56,10 +49,7 @@ internal sealed class MainWindow : Window
                 RefreshStatusBrush();
             }
             if (args.PropertyName is nameof(MainViewModel.HasCovenantSetupTool)
-                or nameof(MainViewModel.CanPackage)
-                or nameof(MainViewModel.CovenantSetupStatus)
-                or nameof(MainViewModel.CovenantSetupPath)
-                or nameof(MainViewModel.OutputDirectory))
+                or nameof(MainViewModel.CanPackage))
             {
                 RefreshPackageControls();
             }
@@ -291,97 +281,6 @@ internal sealed class MainWindow : Window
             Labeled("Primary Payload", payloadBox));
     }
 
-    private FrameworkElement BuildInstallerConfigContent()
-    {
-        _toolStatusText = new TextBlock
-        {
-            TextWrapping = TextWrapping.Wrap
-        };
-        _toolStatusText.SetBinding(
-            TextBlock.TextProperty,
-            new Binding
-            {
-                Path = new PropertyPath(nameof(MainViewModel.CovenantSetupStatus)),
-                Mode = BindingMode.OneWay
-            });
-
-        _covenantSetupPathBox = new TextBox
-        {
-            PlaceholderText = @"C:\path\to\covenant-setup.exe",
-            Text = _viewModel.CovenantSetupPath
-        };
-        _covenantSetupPathBox.TextChanged += (_, _) =>
-        {
-            if (_syncingCovenantSetupPath)
-            {
-                return;
-            }
-
-            if (!string.Equals(_covenantSetupPathBox.Text, _viewModel.CovenantSetupPath, StringComparison.OrdinalIgnoreCase))
-            {
-                _viewModel.RejectCovenantSetupTool("covenant-setup.exe was not validated. Packaging is disabled.");
-            }
-        };
-        _covenantSetupPathBox.LostFocus += async (_, _) => await ValidateTypedCovenantSetupPathAsync(showInvalidMessage: true);
-
-        _browseCovenantSetupButton = new Button
-        {
-            Content = "Browse",
-            Width = 96
-        };
-        _browseCovenantSetupButton.Click += async (_, _) => await BrowseCovenantSetupPathAsync();
-
-        _outputDirectoryBox = BoundTextBox(nameof(MainViewModel.OutputDirectory), @"C:\path\to\dist");
-
-        _chooseOutputButton = new Button
-        {
-            Content = "Choose",
-            Width = 96
-        };
-        _chooseOutputButton.Click += async (_, _) => await ChooseOutputDirectoryAsync();
-
-        _refreshToolButton = new Button
-        {
-            Content = "Refresh Tool Check",
-            Width = 156
-        };
-        _refreshToolButton.Click += (_, _) =>
-        {
-            _viewModel.RefreshCovenantSetupTool();
-            SyncCovenantSetupPathBox();
-            SetInstallerDialogMessage(string.Empty);
-        };
-
-        var actionRow = new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            HorizontalAlignment = HorizontalAlignment.Right,
-            Spacing = 8
-        };
-        actionRow.Children.Add(_refreshToolButton);
-
-        _installerDialogMessageText = new TextBlock
-        {
-            TextWrapping = TextWrapping.Wrap,
-            MaxLines = 6
-        };
-        _secondaryTextBlocks.Add(_installerDialogMessageText);
-
-        var stack = new StackPanel
-        {
-            Spacing = 10,
-            MinWidth = 640,
-            HorizontalAlignment = HorizontalAlignment.Stretch
-        };
-        stack.Children.Add(_toolStatusText);
-        stack.Children.Add(DialogFieldGrid(
-            ("Covenant Setup Executable", _covenantSetupPathBox, _browseCovenantSetupButton),
-            ("Output Directory", _outputDirectoryBox, _chooseOutputButton)));
-        stack.Children.Add(actionRow);
-        stack.Children.Add(_installerDialogMessageText);
-        return stack;
-    }
-
     private FrameworkElement BuildDirectoriesSection()
     {
         var pathBox = new TextBox { PlaceholderText = @"{LocalAppData}\Vendor\App" };
@@ -505,42 +404,24 @@ internal sealed class MainWindow : Window
 
     private async Task ShowInstallerConfigAsync()
     {
-        var dialog = new ContentDialog
-        {
-            Title = "Installer Config",
-            CloseButtonText = "Close",
-            Width = 1080,
-            MinWidth = 1080,
-            Content = BuildInstallerConfigContent()
-        };
+        _installerConfigViewModel.SetManifestValidationState(_viewModel.HasValidationErrors);
+        _installerConfigViewModel.IsBuilding = _isPackaging;
 
+        var dialog = new InstallerConfigDialog(
+            _installerConfigViewModel,
+            WindowNative.GetWindowHandle(this));
         if (Content is FrameworkElement root)
         {
             dialog.XamlRoot = root.XamlRoot;
         }
 
-        dialog.Closing += (_, args) =>
+        var result = await dialog.ShowAsync();
+        if (result == ContentDialogResult.Primary)
         {
-            if (_isPackaging)
-            {
-                args.Cancel = true;
-            }
-        };
-
-        RefreshPackageControls();
-        _ = await dialog.ShowAsync();
-
-        if (_installerDialogMessageText is not null)
-        {
-            _secondaryTextBlocks.Remove(_installerDialogMessageText);
+            _viewModel.SetCovenantSetupTool(_installerConfigViewModel.CovenantSetupTool);
+            _viewModel.OutputDirectory = _installerConfigViewModel.OutputDirectory;
+            RefreshPackageControls();
         }
-        _toolStatusText = null!;
-        _installerDialogMessageText = null!;
-        _covenantSetupPathBox = null!;
-        _browseCovenantSetupButton = null!;
-        _refreshToolButton = null!;
-        _outputDirectoryBox = null!;
-        _chooseOutputButton = null!;
     }
 
     private async Task SaveManifestAsync()
@@ -614,95 +495,6 @@ internal sealed class MainWindow : Window
         return file.Path;
     }
 
-    private async Task BrowseCovenantSetupPathAsync()
-    {
-        var picker = new FileOpenPicker();
-        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
-        picker.SuggestedStartLocation = PickerLocationId.ComputerFolder;
-        picker.FileTypeFilter.Add(".exe");
-
-        var file = await picker.PickSingleFileAsync();
-        if (file is not null)
-        {
-            await AcceptCovenantSetupPathAsync(file.Path, showInvalidMessage: true);
-        }
-    }
-
-    private async Task ValidateTypedCovenantSetupPathAsync(bool showInvalidMessage)
-    {
-        if (_covenantSetupPathBox is null)
-        {
-            return;
-        }
-
-        var path = _covenantSetupPathBox.Text.Trim();
-        if (string.IsNullOrWhiteSpace(path))
-        {
-            _viewModel.RejectCovenantSetupTool("covenant-setup.exe was not found. Packaging is disabled.");
-            SetInstallerDialogMessage(string.Empty);
-            return;
-        }
-
-        if (string.Equals(path, _viewModel.CovenantSetupPath, StringComparison.OrdinalIgnoreCase))
-        {
-            return;
-        }
-
-        await AcceptCovenantSetupPathAsync(path, showInvalidMessage);
-    }
-
-    private async Task<bool> AcceptCovenantSetupPathAsync(string path, bool showInvalidMessage)
-    {
-        SetInstallerDialogMessage("Checking covenant-setup...");
-        var result = await CovenantSetupToolValidator.ValidateAsync(path, CancellationToken.None);
-        if (result.IsValid && result.Tool is not null)
-        {
-            _viewModel.SetCovenantSetupTool(result.Tool);
-            SyncCovenantSetupPathBox();
-            SetInstallerDialogMessage(string.Empty);
-            return true;
-        }
-
-        _viewModel.RejectCovenantSetupTool(result.Message);
-        if (showInvalidMessage)
-        {
-            SetInstallerDialogMessage(result.Message + " Run the help check by selecting the real covenant-setup.exe.");
-        }
-        return false;
-    }
-
-    private void SyncCovenantSetupPathBox()
-    {
-        if (_covenantSetupPathBox is null)
-        {
-            return;
-        }
-
-        _syncingCovenantSetupPath = true;
-        try
-        {
-            _covenantSetupPathBox.Text = _viewModel.CovenantSetupPath;
-        }
-        finally
-        {
-            _syncingCovenantSetupPath = false;
-        }
-    }
-
-    private async Task ChooseOutputDirectoryAsync()
-    {
-        var picker = new FolderPicker();
-        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
-        picker.SuggestedStartLocation = PickerLocationId.DocumentsLibrary;
-        picker.FileTypeFilter.Add("*");
-
-        var folder = await picker.PickSingleFolderAsync();
-        if (folder is not null)
-        {
-            _viewModel.OutputDirectory = folder.Path;
-        }
-    }
-
     private async Task GenerateInstallerAsync(Func<string, string, Task>? showMessageAsync = null)
     {
         showMessageAsync ??= ShowNoticeAsync;
@@ -734,6 +526,7 @@ internal sealed class MainWindow : Window
         _lastSavedManifestPath = manifestPath;
 
         _isPackaging = true;
+        _installerConfigViewModel.IsBuilding = true;
         RefreshPackageControls();
         try
         {
@@ -758,6 +551,7 @@ internal sealed class MainWindow : Window
         finally
         {
             _isPackaging = false;
+            _installerConfigViewModel.IsBuilding = false;
             RefreshPackageControls();
         }
     }
@@ -804,14 +598,6 @@ internal sealed class MainWindow : Window
 
         _copyPreviewButton.Content = "Copy";
         AutomationProperties.SetName(_copyPreviewButton, "Copy TOML preview");
-    }
-
-    private void SetInstallerDialogMessage(string message)
-    {
-        if (_installerDialogMessageText is not null)
-        {
-            _installerDialogMessageText.Text = message;
-        }
     }
 
     private async Task ShowNoticeAsync(string title, string message)
@@ -924,38 +710,10 @@ internal sealed class MainWindow : Window
 
     private void RefreshPackageControls()
     {
-        var controlsAvailable = !_isPackaging;
-        if (_covenantSetupPathBox is not null)
-        {
-            _covenantSetupPathBox.IsEnabled = controlsAvailable;
-        }
-        if (_browseCovenantSetupButton is not null)
-        {
-            _browseCovenantSetupButton.IsEnabled = controlsAvailable;
-        }
-        if (_refreshToolButton is not null)
-        {
-            _refreshToolButton.IsEnabled = controlsAvailable;
-        }
-        if (_outputDirectoryBox is not null)
-        {
-            _outputDirectoryBox.IsEnabled = controlsAvailable;
-        }
-        if (_chooseOutputButton is not null)
-        {
-            _chooseOutputButton.IsEnabled = controlsAvailable;
-        }
         if (_generateInstallerButton is not null)
         {
             _generateInstallerButton.IsEnabled = _viewModel.HasCovenantSetupTool && !_isPackaging;
             _generateInstallerButton.Content = _isPackaging ? "Building..." : "Save and Build";
-        }
-        var brushes = CreateThemeBrushes();
-        if (_toolStatusText is not null)
-        {
-            _toolStatusText.Foreground = _viewModel.HasCovenantSetupTool
-                ? brushes.SuccessText
-                : brushes.ErrorText;
         }
     }
 
@@ -994,20 +752,6 @@ internal sealed class MainWindow : Window
         }
 
         RefreshStatusBrush();
-        RefreshPackageStatusBrush();
-    }
-
-    private void RefreshPackageStatusBrush()
-    {
-        if (_toolStatusText is null)
-        {
-            return;
-        }
-
-        var brushes = CreateThemeBrushes();
-        _toolStatusText.Foreground = _viewModel.HasCovenantSetupTool
-            ? brushes.SuccessText
-            : brushes.ErrorText;
     }
 
     private ElementTheme EffectiveTheme()
@@ -1121,47 +865,6 @@ internal sealed class MainWindow : Window
         });
         stack.Children.Add(control);
         return stack;
-    }
-
-    private static Grid DialogFieldGrid(params (string Label, TextBox TextBox, Button Button)[] fields)
-    {
-        var grid = new Grid
-        {
-            ColumnSpacing = 6,
-            RowSpacing = 2,
-            HorizontalAlignment = HorizontalAlignment.Stretch
-        };
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-
-        for (var index = 0; index < fields.Length; index++)
-        {
-            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-
-            var label = new TextBlock
-            {
-                Text = fields[index].Label,
-                FontWeight = FontWeights.SemiBold,
-                FontSize = 12
-            };
-            Grid.SetRow(label, index * 2);
-            Grid.SetColumn(label, 0);
-            grid.Children.Add(label);
-
-            fields[index].TextBox.HorizontalAlignment = HorizontalAlignment.Stretch;
-            Grid.SetRow(fields[index].TextBox, (index * 2) + 1);
-            Grid.SetColumn(fields[index].TextBox, 0);
-            grid.Children.Add(fields[index].TextBox);
-
-            fields[index].Button.HorizontalAlignment = HorizontalAlignment.Left;
-            fields[index].Button.VerticalAlignment = VerticalAlignment.Bottom;
-            Grid.SetRow(fields[index].Button, (index * 2) + 1);
-            Grid.SetColumn(fields[index].Button, 1);
-            grid.Children.Add(fields[index].Button);
-        }
-
-        return grid;
     }
 
     private static Grid TwoColumn(FrameworkElement left, FrameworkElement right)

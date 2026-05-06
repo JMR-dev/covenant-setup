@@ -1,0 +1,71 @@
+<ContentDialog
+    x:Class="Covenant.Setup.Authoring.InstallerConfigDialog"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:Covenant.Setup.Authoring"
+    Title="Installer Config"
+    PrimaryButtonText="Save"
+    IsPrimaryButtonEnabled="{Binding CanSaveConfig, Mode=OneWay}"
+    PrimaryButtonClick="SaveButton_Click"
+    CloseButtonText="Close">
+
+    <Grid
+        MinWidth="640"
+        ColumnSpacing="8"
+        RowSpacing="8">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="Auto" />
+        </Grid.ColumnDefinitions>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <TextBlock
+            Grid.Row="0"
+            Grid.ColumnSpan="2"
+            Text="{Binding StatusText}"
+            TextWrapping="Wrap" />
+
+        <TextBox
+            Grid.Row="1"
+            Grid.Column="0"
+            MaxWidth="200"
+            Header="Covenant Setup Executable"
+            PlaceholderText="C:\path\to\covenant-setup.exe"
+            Text="{Binding CovenantSetupPath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+
+        <Button
+            Grid.Row="1"
+            Grid.Column="1"
+            MinWidth="96"
+            VerticalAlignment="Bottom"
+            Content="Browse"
+            Click="BrowseCovenantSetupButton_Click" />
+
+        <TextBox
+            Grid.Row="2"
+            Grid.Column="0"
+            MaxWidth="200"
+            Header="Output Directory"
+            PlaceholderText="C:\path\to\dist"
+            Text="{Binding OutputDirectory, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+
+        <Button
+            Grid.Row="2"
+            Grid.Column="1"
+            MinWidth="96"
+            VerticalAlignment="Bottom"
+            Content="Choose"
+            Click="ChooseOutputDirectoryButton_Click" />
+
+        <TextBlock
+            Grid.Row="3"
+            Grid.ColumnSpan="2"
+            Text="{Binding MessageText}"
+            TextWrapping="Wrap" />
+    </Grid>
+</ContentDialog>

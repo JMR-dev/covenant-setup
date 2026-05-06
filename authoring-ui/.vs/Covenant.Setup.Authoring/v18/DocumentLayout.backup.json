@@ -3,6 +3,10 @@
   "WorkspaceRootPath": "C:\\Users\\jasonross\\workspace\\covenant-setup\\authoring-ui\\",
   "Documents": [
     {
+      "AbsoluteMoniker": "D:0:0:{5D26E66D-8F74-39AC-8CD2-24BC7C6E0C0F}|Covenant.Setup.Authoring.csproj|c:\\users\\jasonross\\workspace\\covenant-setup\\authoring-ui\\mainwindow.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{5D26E66D-8F74-39AC-8CD2-24BC7C6E0C0F}|Covenant.Setup.Authoring.csproj|solutionrelative:mainwindow.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
       "AbsoluteMoniker": "D:0:0:{5D26E66D-8F74-39AC-8CD2-24BC7C6E0C0F}|Covenant.Setup.Authoring.csproj|c:\\users\\jasonross\\workspace\\covenant-setup\\authoring-ui\\app.xaml||{F11ACC28-31D1-4C80-A34B-F4E09D3D753C}",
       "RelativeMoniker": "D:0:0:{5D26E66D-8F74-39AC-8CD2-24BC7C6E0C0F}|Covenant.Setup.Authoring.csproj|solutionrelative:app.xaml||{F11ACC28-31D1-4C80-A34B-F4E09D3D753C}"
     },
@@ -18,11 +22,24 @@
       "DocumentGroups": [
         {
           "DockedWidth": 200,
-          "SelectedChildIndex": 1,
+          "SelectedChildIndex": 0,
           "Children": [
             {
               "$type": "Document",
-              "DocumentIndex": 1,
+              "DocumentIndex": 0,
+              "Title": "MainWindow.cs",
+              "DocumentMoniker": "C:\\Users\\jasonross\\workspace\\covenant-setup\\authoring-ui\\MainWindow.cs",
+              "RelativeDocumentMoniker": "MainWindow.cs",
+              "ToolTip": "C:\\Users\\jasonross\\workspace\\covenant-setup\\authoring-ui\\MainWindow.cs",
+              "RelativeToolTip": "MainWindow.cs",
+              "ViewState": "AgIAABsBAAAAAAAAAIA5wBsBAAAAAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-05-05T23:22:18.637Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 2,
               "Title": "Program.cs",
               "DocumentMoniker": "C:\\Users\\jasonross\\workspace\\covenant-setup\\authoring-ui\\Program.cs",
               "RelativeDocumentMoniker": "Program.cs",
@@ -30,12 +47,11 @@
               "RelativeToolTip": "Program.cs",
               "ViewState": "AgIAAAAAAAAAAAAAAAAAAAsAAAAAAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
-              "WhenOpened": "2026-05-05T00:32:51.733Z",
-              "EditorCaption": ""
+              "WhenOpened": "2026-05-05T00:32:51.733Z"
             },
             {
               "$type": "Document",
-              "DocumentIndex": 0,
+              "DocumentIndex": 1,
               "Title": "App.xaml",
               "DocumentMoniker": "C:\\Users\\jasonross\\workspace\\covenant-setup\\authoring-ui\\App.xaml",
               "RelativeDocumentMoniker": "App.xaml",
