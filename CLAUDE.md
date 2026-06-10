@@ -53,7 +53,7 @@ the example manifest (`examples/Covenant-SetupSampleApp-install.toml`).
 - `InstallManifest` — Declarative TOML contract: directories, files, registry, shortcuts, scripts, purge spec
 - `Journal` / `JournalAction` — Serialized record of every mutation for deterministic rollback
 - `MutationTracker` trait — Extensibility point (MVP uses `DeclaredTracker`; future: `ObservedTracker` for ETW-based capture)
-- `PathResolver` — Resolves `{ProgramFilesX64}`, `{LocalAppData}`, `{Desktop}` tokens via `SHGetKnownFolderPath`
+- `PathResolver` — Resolves `{ProgramFilesX64}`, `{ProgramFilesX86}`, `{LocalAppData}`, `{Desktop}` tokens via `SHGetKnownFolderPath`
 - `Logger` — Dual-mode output: structured JSON (`--json` flag) for IPC or human-readable text
 
 **Elevation:** Manifest/journal is scanned for `HKLM` registry or ProgramFiles paths to determine if admin is needed. Auto-relaunches via `ShellExecuteW` with `runas` when `--elevate` flag is set. Exit code 33 signals elevation required.

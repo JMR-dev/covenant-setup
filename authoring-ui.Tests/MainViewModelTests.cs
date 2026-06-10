@@ -16,8 +16,8 @@ public class MainViewModelTests
         Assert.Empty(viewModel.PurgePaths);
         Assert.Equal("Covenant-SetupSampleApp-install.toml", viewModel.ExpectedManifestFileName);
         Assert.Contains("app_name = 'Covenant-Setup Sample App'", viewModel.TomlPreview);
-        Assert.Contains(@"{LocalAppData}\CovenantSetupSample", viewModel.TomlPreview);
-        Assert.Contains(@"{Desktop}\CovenantSetupSample.lnk", viewModel.TomlPreview);
+        Assert.Contains(@"{ProgramFilesX64}\CovenantSetupSample", viewModel.TomlPreview);
+        Assert.Contains(@"{Desktop}\sample_app.lnk", viewModel.TomlPreview);
         Assert.DoesNotContain(@"{Desktop}\Covenant-Setup Sample App.lnk", viewModel.TomlPreview, StringComparison.Ordinal);
         Assert.Contains(@"payload\sample_app.cmd", viewModel.TomlPreview);
     }
@@ -168,9 +168,9 @@ public class MainViewModelTests
 
         var defaultDocument = viewModel.BuildDocument();
         var defaultShortcut = Assert.Single(defaultDocument.Shortcuts);
-        Assert.Equal(@"{Desktop}\RenamedApp.lnk", defaultShortcut.Path);
+        Assert.Equal(@"{Desktop}\renamed.lnk", defaultShortcut.Path);
         Assert.Equal(@"{ProgramFilesX64}\RenamedApp\bin\renamed.exe", defaultShortcut.Target);
-        Assert.Equal(@"{ProgramFilesX64}\RenamedApp", defaultShortcut.WorkingDirectory);
+        Assert.Equal(@"{ProgramFilesX64}\RenamedApp\bin", defaultShortcut.WorkingDirectory);
         Assert.Equal("Launch Renamed App", defaultShortcut.Description);
 
         viewModel.ShortcutDescription = "Start Renamed App";
@@ -218,5 +218,22 @@ public class MainViewModelTests
 
         Assert.True(viewModel.HasValidationErrors);
         Assert.False(viewModel.CanPackage);
+    }
+
+    [Fact]
+    public void Placeholders_update_with_install_root_token()
+    {
+        var viewModel = new MainViewModel(() => null)
+        {
+            InstallRootToken = "{ProgramFilesX64}"
+        };
+
+        Assert.Equal(@"{ProgramFilesX64}\Vendor\App", viewModel.DirectoryPlaceholder);
+        Assert.Equal(@"{ProgramFilesX64}\Vendor\App\bin\app.exe", viewModel.FileDestinationPlaceholder);
+
+        viewModel.InstallRootToken = "{LocalAppData}";
+
+        Assert.Equal(@"{LocalAppData}\Vendor\App", viewModel.DirectoryPlaceholder);
+        Assert.Equal(@"{LocalAppData}\Vendor\App\bin\app.exe", viewModel.FileDestinationPlaceholder);
     }
 }

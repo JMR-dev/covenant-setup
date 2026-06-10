@@ -313,7 +313,14 @@ internal sealed class MainWindow : Window
 
     private FrameworkElement BuildDirectoriesSection()
     {
-        var pathBox = new TextBox { PlaceholderText = @"{LocalAppData}\Vendor\App" };
+        var pathBox = new TextBox();
+        pathBox.SetBinding(
+            TextBox.PlaceholderTextProperty,
+            new Binding
+            {
+                Path = new PropertyPath(nameof(MainViewModel.DirectoryPlaceholder)),
+                Mode = BindingMode.OneWay
+            });
         var rows = RemovableRows(_viewModel.Directories);
         var addButton = new Button { Content = "Add Path", MinWidth = 88 };
         addButton.Click += (_, _) =>
@@ -331,7 +338,14 @@ internal sealed class MainWindow : Window
     private FrameworkElement BuildFilesSection()
     {
         var sourceBox = new TextBox { PlaceholderText = @"payload\app.exe" };
-        var destinationBox = new TextBox { PlaceholderText = @"{LocalAppData}\Vendor\App\bin\app.exe" };
+        var destinationBox = new TextBox();
+        destinationBox.SetBinding(
+            TextBox.PlaceholderTextProperty,
+            new Binding
+            {
+                Path = new PropertyPath(nameof(MainViewModel.FileDestinationPlaceholder)),
+                Mode = BindingMode.OneWay
+            });
         var rows = RemovableRows(_viewModel.Files);
         var addButton = new Button { Content = "Add", MinWidth = 72 };
         addButton.Click += async (_, _) =>
@@ -358,7 +372,14 @@ internal sealed class MainWindow : Window
     {
         var keyBox = new TextBox { PlaceholderText = @"HKCU\Software\VendorApp" };
         var nameBox = new TextBox { PlaceholderText = "InstallRoot" };
-        var valueBox = new TextBox { PlaceholderText = @"{LocalAppData}\Vendor\App" };
+        var valueBox = new TextBox();
+        valueBox.SetBinding(
+            TextBox.PlaceholderTextProperty,
+            new Binding
+            {
+                Path = new PropertyPath(nameof(MainViewModel.DirectoryPlaceholder)),
+                Mode = BindingMode.OneWay
+            });
         var rows = RemovableRows(_viewModel.Registry);
         var addButton = new Button { Content = "Add", MinWidth = 72 };
         addButton.Click += async (_, _) =>
@@ -403,7 +424,14 @@ internal sealed class MainWindow : Window
             Height = 76,
             PlaceholderText = "-ExecutionPolicy"
         };
-        var workingDirectoryBox = new TextBox { PlaceholderText = @"{LocalAppData}\Vendor\App" };
+        var workingDirectoryBox = new TextBox();
+        workingDirectoryBox.SetBinding(
+            TextBox.PlaceholderTextProperty,
+            new Binding
+            {
+                Path = new PropertyPath(nameof(MainViewModel.DirectoryPlaceholder)),
+                Mode = BindingMode.OneWay
+            });
         var rows = RemovableRows(_viewModel.Scripts);
         var addButton = new Button { Content = "Add", MinWidth = 72 };
         addButton.Click += async (_, _) =>

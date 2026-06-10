@@ -58,6 +58,10 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
         set => SetProperty(ref _installRootToken, value);
     }
 
+    public string DirectoryPlaceholder => $"{InstallRootToken}\\Vendor\\App";
+
+    public string FileDestinationPlaceholder => $"{InstallRootToken}\\Vendor\\App\\bin\\app.exe";
+
     public string ApplicationFolder
     {
         get => _applicationFolder;
@@ -414,6 +418,8 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(ShortcutWorkingDirectory));
         OnPropertyChanged(nameof(PurgePathsPreview));
         OnPropertyChanged(nameof(PurgeRegistryBranchesPreview));
+        OnPropertyChanged(nameof(DirectoryPlaceholder));
+        OnPropertyChanged(nameof(FileDestinationPlaceholder));
     }
 
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null)

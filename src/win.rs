@@ -36,6 +36,7 @@ use windows::core::{Interface, PCWSTR, PWSTR, w};
 
 pub struct PathResolver {
     pub program_files_x64: PathBuf,
+    pub program_files_x86: PathBuf,
     pub local_app_data: PathBuf,
     pub desktop: PathBuf,
     admin_roots: Vec<String>,
@@ -50,6 +51,7 @@ impl PathResolver {
             build_admin_roots(&[&program_files_x64, &program_files_x86, &windows_dir]);
         Ok(Self {
             program_files_x64,
+            program_files_x86,
             local_app_data: known_folder(&FOLDERID_LocalAppData, logger)?,
             desktop: known_folder(&FOLDERID_Desktop, logger)?,
             admin_roots,
@@ -62,6 +64,10 @@ impl PathResolver {
                 .replace(
                     "{ProgramFilesX64}",
                     &self.program_files_x64.to_string_lossy(),
+                )
+                .replace(
+                    "{ProgramFilesX86}",
+                    &self.program_files_x86.to_string_lossy(),
                 )
                 .replace("{LocalAppData}", &self.local_app_data.to_string_lossy())
                 .replace("{Desktop}", &self.desktop.to_string_lossy()),
@@ -80,6 +86,7 @@ impl PathResolver {
         let admin_roots = build_admin_roots(&roots.iter().collect::<Vec<_>>());
         Self {
             program_files_x64: PathBuf::new(),
+            program_files_x86: PathBuf::new(),
             local_app_data: PathBuf::new(),
             desktop: PathBuf::new(),
             admin_roots,
@@ -629,6 +636,33 @@ mod tests {
             PathBuf::from("C:\\Program Files (x86)"),
             PathBuf::from("D:\\Windows"),
         ])
+    }
+
+    #[test]
+    fn resolve_replaces_every_known_folder_token() {
+        let r = PathResolver {
+            program_files_x64: PathBuf::from("C:\\Program Files"),
+            program_files_x86: PathBuf::from("C:\\Program Files (x86)"),
+            local_app_data: PathBuf::from("C:\\Users\\alice\\AppData\\Local"),
+            desktop: PathBuf::from("C:\\Users\\alice\\Desktop"),
+            admin_roots: Vec::new(),
+        };
+        assert_eq!(
+            r.resolve("{ProgramFilesX64}\\App\\bin"),
+            PathBuf::from("C:\\Program Files\\App\\bin")
+        );
+        assert_eq!(
+            r.resolve("{ProgramFilesX86}\\Vendor\\app.exe"),
+            PathBuf::from("C:\\Program Files (x86)\\Vendor\\app.exe")
+        );
+        assert_eq!(
+            r.resolve("{LocalAppData}\\Vendor"),
+            PathBuf::from("C:\\Users\\alice\\AppData\\Local\\Vendor")
+        );
+        assert_eq!(
+            r.resolve("{Desktop}\\App.lnk"),
+            PathBuf::from("C:\\Users\\alice\\Desktop\\App.lnk")
+        );
     }
 
     #[test]
