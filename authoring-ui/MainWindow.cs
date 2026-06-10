@@ -1,11 +1,15 @@
 using System.Collections.ObjectModel;
+using System.Runtime.InteropServices;
 using Microsoft.UI;
+using Microsoft.UI.Dispatching;
+using Microsoft.UI.Input;
 using Microsoft.UI.Text;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Data;
+using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Windows.UI;
 using Windows.UI.ViewManagement;
@@ -29,7 +33,18 @@ internal sealed class MainWindow : Window
     private Button _copyPreviewButton = null!;
     private Button _generateInstallerButton = null!;
     private Grid _rootGrid = null!;
+    private ScrollView _editorScroll = null!;
+    private ColumnSplitter _paneSplitter = null!;
     private ToggleSwitch _themeToggle = null!;
+
+    // Keep the subclass delegate alive for the window's lifetime so the GC
+    // cannot collect the thunk the OS window procedure chain is calling into.
+    private SubclassProc? _wheelSubclassProc;
+    private IntPtr _hwnd;
+    private long _lastXamlWheelTick;
+
+    private const double EditorMinWidth = 360;
+    private const double PreviewMinWidth = 320;
     private string? _lastSavedManifestPath;
     private bool _isPackaging;
     private int _copyPreviewFeedbackVersion;
@@ -71,12 +86,15 @@ internal sealed class MainWindow : Window
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(480) });
-        root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        var editorColumn = new ColumnDefinition { Width = new GridLength(480), MinWidth = EditorMinWidth };
+        var previewColumn = new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star), MinWidth = PreviewMinWidth };
+        root.ColumnDefinitions.Add(editorColumn);
+        root.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        root.ColumnDefinitions.Add(previewColumn);
 
         var header = BuildHeader();
         Grid.SetRow(header, 0);
-        Grid.SetColumnSpan(header, 2);
+        Grid.SetColumnSpan(header, 3);
         root.Children.Add(header);
 
         var editor = BuildEditor();
@@ -84,9 +102,14 @@ internal sealed class MainWindow : Window
         Grid.SetColumn(editor, 0);
         root.Children.Add(editor);
 
+        _paneSplitter = new ColumnSplitter(editorColumn, previewColumn, EditorMinWidth, PreviewMinWidth);
+        Grid.SetRow(_paneSplitter, 1);
+        Grid.SetColumn(_paneSplitter, 1);
+        root.Children.Add(_paneSplitter);
+
         var preview = BuildPreview();
         Grid.SetRow(preview, 1);
-        Grid.SetColumn(preview, 1);
+        Grid.SetColumn(preview, 2);
         root.Children.Add(preview);
 
         _statusText = new TextBlock
@@ -103,7 +126,7 @@ internal sealed class MainWindow : Window
             });
 
         Grid.SetRow(_statusText, 2);
-        Grid.SetColumnSpan(_statusText, 2);
+        Grid.SetColumnSpan(_statusText, 3);
         root.Children.Add(_statusText);
 
         return root;
@@ -185,7 +208,7 @@ internal sealed class MainWindow : Window
         return header;
     }
 
-    private ScrollViewer BuildEditor()
+    private ScrollView BuildEditor()
     {
         var stack = new StackPanel { Spacing = 12 };
         stack.Children.Add(BuildAppSection());
@@ -195,11 +218,18 @@ internal sealed class MainWindow : Window
         stack.Children.Add(BuildShortcutsSection());
         stack.Children.Add(BuildScriptsSection());
 
-        return new ScrollViewer
+        // ScrollView (not the legacy ScrollViewer) on purpose: the legacy control
+        // scrolls through the OS DirectManipulation service, which consumes wheel
+        // input below the XAML layer and then drops it for WinUI 3 windows
+        // (microsoft-ui-xaml #8764 / #10091 / #10480 — wheel dead, scrollbar drag
+        // fine). ScrollView drives InteractionTracker from XAML pointer events, so
+        // DirectManipulation never claims the wheel over the editor.
+        _editorScroll = new ScrollView
         {
-            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            VerticalScrollBarVisibility = ScrollingScrollBarVisibility.Auto,
             Content = stack
         };
+        return _editorScroll;
     }
 
     private Grid BuildPreview()
@@ -276,7 +306,7 @@ internal sealed class MainWindow : Window
             "App",
             Labeled("Name", appNameBox),
             TwoColumn(
-                Labeled("Install Root", rootCombo),
+                Labeled("Payload App Install Root", rootCombo),
                 Labeled("Application Target Installation Folder", folderBox)),
             Labeled("Primary Payload", payloadBox));
     }
@@ -636,7 +666,272 @@ internal sealed class MainWindow : Window
         var x = workArea.X + Math.Max(0, (workArea.Width - width) / 2);
         var y = workArea.Y + Math.Max(0, (workArea.Height - height) / 2);
         appWindow.MoveAndResize(new RectInt32(x, y, width, height));
+
+        _hwnd = hwnd;
+        InstallRawWheelFallback();
+        Closed += (_, _) => RemoveRawWheelFallback();
     }
+
+    // On some machines WinUI 3 never delivers bare mouse-wheel input to the app:
+    // the OS DirectManipulation service (kept active on the window's input HWND
+    // by the legacy ScrollViewers inside every TextBox) claims the wheel below
+    // the message layer and then drops it because it mis-judges the window's
+    // activation state (microsoft-ui-xaml #8764 / #10091 / #10480). No window
+    // message, XAML pointer event, or InteractionTracker input ever fires.
+    // Raw Input is a parallel delivery channel DirectManipulation cannot
+    // intercept, so we register for mouse raw input and scroll the pane under
+    // the cursor ourselves. When the normal pipeline IS alive (healthy
+    // machines), the XAML wheel event recorded below makes the fallback bow out
+    // so nothing scrolls twice.
+    private void InstallRawWheelFallback()
+    {
+        if (_wheelSubclassProc is not null)
+        {
+            return;
+        }
+
+        _wheelSubclassProc = WheelInputSubclassProc;
+        if (!SetWindowSubclass(_hwnd, _wheelSubclassProc, 1, IntPtr.Zero))
+        {
+            _wheelSubclassProc = null;
+            return;
+        }
+
+        var device = new RAWINPUTDEVICE
+        {
+            UsagePage = 0x01, // HID_USAGE_PAGE_GENERIC
+            Usage = 0x02,     // HID_USAGE_GENERIC_MOUSE
+            Flags = 0,        // deliver while this window's thread is foreground
+            Target = _hwnd
+        };
+        RegisterRawInputDevices([device], 1, (uint)Marshal.SizeOf<RAWINPUTDEVICE>());
+
+        _rootGrid.AddHandler(
+            UIElement.PointerWheelChangedEvent,
+            new PointerEventHandler((_, _) => _lastXamlWheelTick = Environment.TickCount64),
+            handledEventsToo: true);
+    }
+
+    private void RemoveRawWheelFallback()
+    {
+        if (_wheelSubclassProc is not null)
+        {
+            RemoveWindowSubclass(_hwnd, _wheelSubclassProc, 1);
+            _wheelSubclassProc = null;
+        }
+    }
+
+    private IntPtr WheelInputSubclassProc(
+        IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam, UIntPtr idSubclass, IntPtr refData)
+    {
+        if (msg == WM_INPUT)
+        {
+            try
+            {
+                HandleRawWheelInput(lParam);
+            }
+            catch
+            {
+                // Never let an input-path failure take down the window procedure.
+            }
+        }
+
+        return DefSubclassProc(hWnd, msg, wParam, lParam);
+    }
+
+    private void HandleRawWheelInput(IntPtr rawInputHandle)
+    {
+        var size = (uint)Marshal.SizeOf<RAWINPUT>();
+        if (GetRawInputData(rawInputHandle, RID_INPUT, out var raw, ref size, (uint)Marshal.SizeOf<RAWINPUTHEADER>())
+            == unchecked((uint)-1))
+        {
+            return;
+        }
+
+        if (raw.Header.Type != RIM_TYPEMOUSE || (raw.Mouse.ButtonFlags & RI_MOUSE_WHEEL) == 0)
+        {
+            return;
+        }
+
+        var delta = (short)raw.Mouse.ButtonData;
+        if (delta == 0 || (GetKeyState(VK_CONTROL) & 0x8000) != 0)
+        {
+            return; // Ctrl+wheel is zoom and does reach the XAML pipeline.
+        }
+
+        // Give a healthy XAML wheel event (already ahead of us in the queue) a
+        // chance to run first; if it does, the normal pipeline owns scrolling.
+        var stamp = Environment.TickCount64;
+        DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () =>
+        {
+            var xamlSawThisNotch = _lastXamlWheelTick >= stamp - 32;
+            var xamlRecentlyAlive = Environment.TickCount64 - _lastXamlWheelTick <= 250;
+            if (!xamlSawThisNotch && !xamlRecentlyAlive)
+            {
+                ScrollPaneUnderCursor(delta);
+            }
+        });
+    }
+
+    private void ScrollPaneUnderCursor(short delta)
+    {
+        if (_rootGrid?.XamlRoot is null || !GetCursorPos(out var screen))
+        {
+            return;
+        }
+
+        var hit = WindowFromPoint(screen);
+        if (hit != _hwnd && GetAncestor(hit, GA_ROOT) != _hwnd)
+        {
+            return;
+        }
+
+        // A ContentDialog overlays the panes inside the same HWND; don't scroll
+        // what's underneath it.
+        if (VisualTreeHelper.GetOpenPopupsForXamlRoot(_rootGrid.XamlRoot).Count > 0)
+        {
+            return;
+        }
+
+        var client = screen;
+        if (!ScreenToClient(_hwnd, ref client))
+        {
+            return;
+        }
+
+        var scale = _rootGrid.XamlRoot.RasterizationScale;
+        if (scale <= 0)
+        {
+            scale = 1;
+        }
+
+        var cursor = new Windows.Foundation.Point(client.X / scale, client.Y / scale);
+        if (IsOver(_editorScroll, cursor))
+        {
+            _editorScroll.ScrollBy(0, -delta, new ScrollingScrollOptions(ScrollingAnimationMode.Disabled));
+        }
+        else if (IsOver(_previewBox, cursor))
+        {
+            var inner = FindDescendant<ScrollViewer>(_previewBox);
+            inner?.ChangeView(null, inner.VerticalOffset - delta, null, disableAnimation: true);
+        }
+    }
+
+    private static bool IsOver(FrameworkElement? element, Windows.Foundation.Point cursor)
+    {
+        if (element?.XamlRoot is null)
+        {
+            return false;
+        }
+
+        var origin = element.TransformToVisual(null).TransformPoint(new Windows.Foundation.Point(0, 0));
+        return cursor.X >= origin.X && cursor.X <= origin.X + element.ActualWidth
+            && cursor.Y >= origin.Y && cursor.Y <= origin.Y + element.ActualHeight;
+    }
+
+    private static T? FindDescendant<T>(DependencyObject parent) where T : class
+    {
+        var count = VisualTreeHelper.GetChildrenCount(parent);
+        for (var i = 0; i < count; i++)
+        {
+            var child = VisualTreeHelper.GetChild(parent, i);
+            if (child is T match)
+            {
+                return match;
+            }
+
+            if (FindDescendant<T>(child) is { } nested)
+            {
+                return nested;
+            }
+        }
+
+        return null;
+    }
+
+    private const uint WM_INPUT = 0x00FF;
+    private const uint RID_INPUT = 0x10000003;
+    private const uint RIM_TYPEMOUSE = 0;
+    private const ushort RI_MOUSE_WHEEL = 0x0400;
+    private const int VK_CONTROL = 0x11;
+    private const uint GA_ROOT = 2;
+
+    private delegate IntPtr SubclassProc(
+        IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam, UIntPtr idSubclass, IntPtr refData);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINT
+    {
+        public int X;
+        public int Y;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RAWINPUTDEVICE
+    {
+        public ushort UsagePage;
+        public ushort Usage;
+        public uint Flags;
+        public IntPtr Target;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RAWINPUTHEADER
+    {
+        public uint Type;
+        public uint Size;
+        public IntPtr Device;
+        public IntPtr WParam;
+    }
+
+    [StructLayout(LayoutKind.Explicit)]
+    private struct RAWMOUSE
+    {
+        [FieldOffset(0)] public ushort Flags;
+        [FieldOffset(4)] public ushort ButtonFlags;
+        [FieldOffset(6)] public ushort ButtonData;
+        [FieldOffset(8)] public uint RawButtons;
+        [FieldOffset(12)] public int LastX;
+        [FieldOffset(16)] public int LastY;
+        [FieldOffset(20)] public uint ExtraInformation;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RAWINPUT
+    {
+        public RAWINPUTHEADER Header;
+        public RAWMOUSE Mouse;
+    }
+
+    [DllImport("comctl32.dll")]
+    private static extern bool SetWindowSubclass(IntPtr hWnd, SubclassProc pfnSubclass, UIntPtr uIdSubclass, IntPtr dwRefData);
+
+    [DllImport("comctl32.dll")]
+    private static extern bool RemoveWindowSubclass(IntPtr hWnd, SubclassProc pfnSubclass, UIntPtr uIdSubclass);
+
+    [DllImport("comctl32.dll")]
+    private static extern IntPtr DefSubclassProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool RegisterRawInputDevices(RAWINPUTDEVICE[] devices, uint count, uint size);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetRawInputData(IntPtr hRawInput, uint uiCommand, out RAWINPUT pData, ref uint pcbSize, uint cbSizeHeader);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetCursorPos(out POINT point);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr WindowFromPoint(POINT point);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetAncestor(IntPtr hwnd, uint gaFlags);
+
+    [DllImport("user32.dll")]
+    private static extern bool ScreenToClient(IntPtr hWnd, ref POINT point);
+
+    [DllImport("user32.dll")]
+    private static extern short GetKeyState(int virtualKey);
 
     private void ApplyInitialTheme()
     {
@@ -749,6 +1044,11 @@ internal sealed class MainWindow : Window
             _previewBox.Background = brushes.PreviewBackground;
             _previewBox.Foreground = brushes.PreviewText;
             _previewBox.BorderBrush = brushes.Border;
+        }
+
+        if (_paneSplitter is not null)
+        {
+            _paneSplitter.Background = brushes.Border;
         }
 
         RefreshStatusBrush();
@@ -964,6 +1264,81 @@ internal sealed class MainWindow : Window
         _rowBorders.Add(border);
         ApplyThemeBrushes();
         return border;
+    }
+
+    // Thin draggable divider between the editor and preview panes. Dragging
+    // adjusts the editor column's pixel width; the preview column is star-sized
+    // and absorbs the remainder. Both panes are clamped to sensible minimums.
+    private sealed class ColumnSplitter : Grid
+    {
+        private readonly ColumnDefinition _primary;
+        private readonly ColumnDefinition _secondary;
+        private readonly double _minPrimary;
+        private readonly double _minSecondary;
+        private bool _dragging;
+        private double _startX;
+        private double _startWidth;
+        private double _available;
+
+        public ColumnSplitter(
+            ColumnDefinition primary,
+            ColumnDefinition secondary,
+            double minPrimary,
+            double minSecondary)
+        {
+            _primary = primary;
+            _secondary = secondary;
+            _minPrimary = minPrimary;
+            _minSecondary = minSecondary;
+
+            Width = 6;
+            HorizontalAlignment = HorizontalAlignment.Stretch;
+            VerticalAlignment = VerticalAlignment.Stretch;
+            ProtectedCursor = InputSystemCursor.Create(InputSystemCursorShape.SizeWestEast);
+
+            // Pointer capture (rather than ManipulationMode) is used deliberately:
+            // enabling the manipulation pipeline on this element intercepts the
+            // mouse-wheel routing the adjacent editor pane depends on.
+            PointerPressed += OnPointerPressed;
+            PointerMoved += OnPointerMoved;
+            PointerReleased += OnPointerReleased;
+            PointerCaptureLost += OnPointerCaptureLost;
+        }
+
+        private void OnPointerPressed(object sender, PointerRoutedEventArgs e)
+        {
+            _dragging = CapturePointer(e.Pointer);
+            _startX = e.GetCurrentPoint(null).Position.X;
+            _startWidth = _primary.ActualWidth;
+            _available = _primary.ActualWidth + _secondary.ActualWidth;
+            e.Handled = true;
+        }
+
+        private void OnPointerMoved(object sender, PointerRoutedEventArgs e)
+        {
+            if (!_dragging)
+            {
+                return;
+            }
+
+            var delta = e.GetCurrentPoint(null).Position.X - _startX;
+            var max = Math.Max(_minPrimary, _available - _minSecondary);
+            var desired = Math.Clamp(_startWidth + delta, _minPrimary, max);
+            _primary.Width = new GridLength(desired);
+            e.Handled = true;
+        }
+
+        private void OnPointerReleased(object sender, PointerRoutedEventArgs e)
+        {
+            if (_dragging)
+            {
+                ReleasePointerCapture(e.Pointer);
+                _dragging = false;
+                e.Handled = true;
+            }
+        }
+
+        private void OnPointerCaptureLost(object sender, PointerRoutedEventArgs e) => _dragging = false;
     }
 
     private static IReadOnlyList<string> SplitLines(string value) =>

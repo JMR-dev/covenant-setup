@@ -9,7 +9,7 @@ namespace Covenant.Setup.Authoring;
 internal sealed partial class MainViewModel : INotifyPropertyChanged
 {
     private string _appName = "Covenant-Setup Sample App";
-    private string _installRootToken = "{LocalAppData}";
+    private string _installRootToken = "{ProgramFilesX64}";
     private string _applicationFolder = "CovenantSetupSample";
     private string _primaryPayload = @"payload\sample_app.cmd";
     private string _outputDirectory = Path.Combine(Environment.CurrentDirectory, "dist");
