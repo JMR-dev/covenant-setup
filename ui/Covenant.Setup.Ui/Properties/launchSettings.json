@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "Covenant.Setup.Ui": {
+      "commandName": "Project",
+      "commandLineArgs": "--mock install-slow"
+    }
+  }
+}

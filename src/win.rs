@@ -17,6 +17,7 @@ use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
     CoTaskMemFree, CoUninitialize, IPersistFile,
 };
+use windows::Win32::System::Pipes::PeekNamedPipe;
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_SET_VALUE, KEY_WOW64_64KEY,
     REG_OPEN_CREATE_OPTIONS, REG_OPTION_NON_VOLATILE, REG_SAM_FLAGS, REG_SZ, REG_VALUE_TYPE,
@@ -291,6 +292,32 @@ pub fn remove_file_with_fallback(path: &Path, logger: &Logger) -> Result<(), App
     logger.unsafe_exit("MoveFileExW", json!({"ok": move_result.is_ok()}));
     move_result?;
     Ok(())
+}
+
+/// Returns how many bytes are ready to read on `pipe` without blocking. Used
+/// by the GUI progress session to poll for a `cancel_request` line: leaving a
+/// blocking read pending on a synchronous pipe handle would serialize against
+/// (and stall) progress writes on the same handle.
+pub fn peek_named_pipe_available(pipe: &fs::File, logger: &Logger) -> Result<u32, AppError> {
+    use std::os::windows::io::AsRawHandle;
+    let mut available = 0u32;
+    logger.unsafe_enter("PeekNamedPipe", json!({}));
+    let result = unsafe {
+        PeekNamedPipe(
+            HANDLE(pipe.as_raw_handle()),
+            None,
+            0,
+            None,
+            Some(&mut available),
+            None,
+        )
+    };
+    logger.unsafe_exit(
+        "PeekNamedPipe",
+        json!({"ok": result.is_ok(), "available": available}),
+    );
+    result?;
+    Ok(available)
 }
 
 pub fn set_registry_string(

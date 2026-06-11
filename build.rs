@@ -5,6 +5,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+// Must match the bundle format read by extract_ui_bundle in src/ui.rs.
 const UI_BUNDLE_MAGIC: &[u8] = b"COVENANT_SETUP_UI_BUNDLE_V1\n";
 
 fn main() {

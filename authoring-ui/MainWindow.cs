@@ -1174,7 +1174,9 @@ internal sealed class MainWindow : Window
             Child = stack
         };
         _sectionBorders.Add(border);
-        ApplyThemeBrushes();
+        var brushes = CreateThemeBrushes();
+        border.Background = brushes.SurfaceBackground;
+        border.BorderBrush = brushes.Border;
         return border;
     }
 
@@ -1290,7 +1292,9 @@ internal sealed class MainWindow : Window
             Child = grid
         };
         _rowBorders.Add(border);
-        ApplyThemeBrushes();
+        var brushes = CreateThemeBrushes();
+        border.Background = brushes.RowBackground;
+        border.BorderBrush = brushes.Border;
         return border;
     }
 

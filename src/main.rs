@@ -26,6 +26,7 @@ use ui::ProgressSink;
 
 const EXIT_ELEVATION_REQUIRED: i32 = 33;
 const EXIT_OPERATION_FAILED: i32 = 1;
+const EXIT_CANCELLED: i32 = 40;
 const EMBEDDED_MAGIC: &[u8] = b"COVENANT_SETUP_BUNDLE_V1";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 static FAILURE_UX_SHOWN: AtomicBool = AtomicBool::new(false);
@@ -92,6 +93,8 @@ struct InstallManifest {
     scripts: Vec<ScriptSpec>,
     #[serde(default)]
     purge: PurgeSpec,
+    #[serde(default)]
+    support_contact: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,6 +167,8 @@ struct Journal {
     manifest_path: Option<PathBuf>,
     actions: Vec<JournalAction>,
     purge: PurgeSpec,
+    #[serde(default)]
+    support_contact: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -223,7 +228,13 @@ struct EmbeddedFileIndexEntry {
 
 trait MutationTracker {
     fn record(&mut self, action: JournalAction);
-    fn finish(self, app_name: String, manifest_path: Option<PathBuf>, purge: PurgeSpec) -> Journal;
+    fn finish(
+        self,
+        app_name: String,
+        manifest_path: Option<PathBuf>,
+        purge: PurgeSpec,
+        support_contact: Option<String>,
+    ) -> Journal;
 }
 
 struct DeclaredTracker {
@@ -243,12 +254,19 @@ impl MutationTracker for DeclaredTracker {
         self.actions.push(action);
     }
 
-    fn finish(self, app_name: String, manifest_path: Option<PathBuf>, purge: PurgeSpec) -> Journal {
+    fn finish(
+        self,
+        app_name: String,
+        manifest_path: Option<PathBuf>,
+        purge: PurgeSpec,
+        support_contact: Option<String>,
+    ) -> Journal {
         Journal {
             app_name,
             manifest_path,
             actions: self.actions,
             purge,
+            support_contact,
         }
     }
 }
@@ -264,6 +282,10 @@ enum RegistryRoot {
 enum AppError {
     #[error("{0}")]
     Message(String),
+    #[error("Installation cancelled; changes were reverted")]
+    Cancelled,
+    #[error("Installation cancelled by user")]
+    CancelledByUser,
     #[error(transparent)]
     Io(#[from] io::Error),
     #[error(transparent)]
@@ -424,11 +446,13 @@ fn main() {
                     && !preferences.json
                     && sys.ui_available()
                     && !failure_ux_shown()
+                    && !matches!(err, AppError::Cancelled)
                 {
                     let _ = sys.ui_report_error(&err.to_string());
                 }
-                logger.error(err, EXIT_OPERATION_FAILED);
-                EXIT_OPERATION_FAILED
+                let code = error_exit_code(&err);
+                logger.error(err, code);
+                code
             }
         };
         process::exit(exit_code);
@@ -438,17 +462,22 @@ fn main() {
         Ok(()) => 0,
         Err(AppError::Message(message)) if message == "__elevated_relaunch__" => 0,
         Err(err) => {
-            let code = if matches!(&err, AppError::Message(message) if message.contains("Elevation required"))
-            {
-                EXIT_ELEVATION_REQUIRED
-            } else {
-                EXIT_OPERATION_FAILED
-            };
+            let code = error_exit_code(&err);
             logger.error(err, code);
             code
         }
     };
     process::exit(exit_code);
+}
+
+fn error_exit_code(err: &AppError) -> i32 {
+    match err {
+        AppError::Cancelled => EXIT_CANCELLED,
+        AppError::Message(message) if message.contains("Elevation required") => {
+            EXIT_ELEVATION_REQUIRED
+        }
+        _ => EXIT_OPERATION_FAILED,
+    }
 }
 
 fn run(cli: Cli, sys: &dyn Sys, logger: &Logger) -> Result<(), AppError> {
@@ -476,8 +505,9 @@ fn run(cli: Cli, sys: &dyn Sys, logger: &Logger) -> Result<(), AppError> {
             select_ui(preferences, sys, logger)?,
             preferences.automation,
             sys,
-            None,
+            &mut None,
             logger,
+            false,
         ),
         Commands::Cleanup {
             target_exe,
@@ -912,12 +942,6 @@ fn run_bundled_installer(
         "bundled_installer_ui_selected",
         json!({"ui_mode": ui_mode_name(ui_mode), "automation": preferences.automation}),
     );
-    if ui_mode == UiMode::Gui
-        && !preferences.automation
-        && !sys.ui_confirm_install(&metadata.app_name)?
-    {
-        return Ok(());
-    }
     match install(
         &manifest_path,
         None,
@@ -930,22 +954,35 @@ fn run_bundled_installer(
     ) {
         Ok(()) => {
             trace_event("bundled_installer_install_ok", json!({}));
-            if ui_mode == UiMode::Gui && !preferences.automation {
-                sys.ui_report_success(&metadata.app_name)?;
-            }
+            // The progress window now lingers showing the success result with
+            // a Close button, so no extra success prompt is needed.
             Ok(())
         }
         Err(err) => {
-            trace_event(
-                "bundled_installer_install_error",
-                json!({"error": err.to_string()}),
-            );
-            if ui_mode == UiMode::Gui && !preferences.automation && !failure_ux_shown() {
-                sys.ui_report_error(&err.to_string())?;
+            if matches!(err, AppError::CancelledByUser) {
+                trace_event("bundled_installer_install_cancelled", json!({}));
+                return Ok(());
+            }
+            let err_msg = err.to_string();
+            trace_event("bundled_installer_install_error", json!({"error": err_msg}));
+            if ui_mode == UiMode::Gui
+                && !preferences.automation
+                && !failure_ux_shown()
+                && !matches!(err, AppError::Cancelled)
+            {
+                sys.ui_report_error(&err_msg)?;
             }
             Err(err)
         }
     }
+}
+
+fn write_journal(path: &Path, journal: &Journal) -> Result<(), AppError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, serde_json::to_vec_pretty(journal)?)?;
+    Ok(())
 }
 
 fn install(
@@ -965,23 +1002,31 @@ fn install(
     );
     let app_name = manifest.app_name.clone();
     let _progress = start_tui_progress(ui_mode, format!("Installing {} ", manifest.app_name));
+    let effective_logger = if ui_mode == UiMode::Tui {
+        logger.quiet_clone()
+    } else {
+        logger.clone()
+    };
+    let resolver = win::PathResolver::new(&effective_logger)?;
+    let install_total = total_install_steps(&manifest);
     let mut gui_progress = if progress_override.is_some() {
         progress_override
     } else {
+        let install_root = infer_install_root(&manifest, &resolver);
         start_gui_progress(
             ui_mode,
             sys,
             &format!("Installing {}", manifest.app_name),
-            total_install_steps(&manifest),
+            Some(&manifest.app_name),
+            install_root.as_deref(),
+            install_total,
+            automation,
+            &effective_logger,
         )?
     };
+    let mut tracker = DeclaredTracker::new();
+    let mut runtime_opt: Option<InstallRuntime> = None;
     let result = (|| -> Result<(), AppError> {
-        let effective_logger = if ui_mode == UiMode::Tui {
-            logger.quiet_clone()
-        } else {
-            logger.clone()
-        };
-        let resolver = win::PathResolver::new(&effective_logger)?;
         let requires_admin = manifest_requires_admin(&manifest, &resolver)?;
         ensure_elevation_if_needed(requires_admin, elevate, sys, &effective_logger)?;
         trace_event(
@@ -995,7 +1040,7 @@ fn install(
             requires_admin,
             &resolver,
         )?;
-        let mut tracker = DeclaredTracker::new();
+        runtime_opt = Some(runtime.clone());
 
         let mut progress_step = 0usize;
         for directory in &manifest.directories {
@@ -1004,6 +1049,7 @@ fn install(
             advance_gui_progress_step(
                 &mut gui_progress,
                 &mut progress_step,
+                install_total,
                 &format!("Creating directory {}", path.display()),
             )?;
             win::create_directory_recursive(&path, &effective_logger)?;
@@ -1023,6 +1069,7 @@ fn install(
             advance_gui_progress_step(
                 &mut gui_progress,
                 &mut progress_step,
+                install_total,
                 &format!("Copying file to {}", destination.display()),
             )?;
             win::copy_file(&source, &destination, &effective_logger)?;
@@ -1042,6 +1089,7 @@ fn install(
             advance_gui_progress_step(
                 &mut gui_progress,
                 &mut progress_step,
+                install_total,
                 &format!("Writing registry value {} in {}", entry.name, entry.key),
             )?;
             sys.set_registry_string(
@@ -1072,6 +1120,7 @@ fn install(
             advance_gui_progress_step(
                 &mut gui_progress,
                 &mut progress_step,
+                install_total,
                 &format!("Creating shortcut {}", path.display()),
             )?;
             win::create_shortcut(
@@ -1094,6 +1143,7 @@ fn install(
             advance_gui_progress_step(
                 &mut gui_progress,
                 &mut progress_step,
+                install_total,
                 &format!("Running script {}", script.command),
             )?;
             execute_script(
@@ -1113,6 +1163,7 @@ fn install(
             advance_gui_progress_step(
                 &mut gui_progress,
                 &mut progress_step,
+                install_total,
                 &format!("Installing uninstaller {}", uninstall_exe_path.display()),
             )?;
             install_uninstaller(uninstall_exe_path, &effective_logger)?;
@@ -1128,6 +1179,7 @@ fn install(
             advance_gui_progress_step(
                 &mut gui_progress,
                 &mut progress_step,
+                install_total,
                 &format!("Registering {} in Installed Apps", manifest.app_name),
             )?;
             register_uninstall_entry(
@@ -1155,15 +1207,20 @@ fn install(
             }
         }
 
-        let journal = tracker.finish(
-            manifest.app_name.clone(),
-            Some(manifest_path.to_path_buf()),
-            manifest.purge,
-        );
-        if let Some(parent) = runtime.journal_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(&runtime.journal_path, serde_json::to_vec_pretty(&journal)?)?;
+        Ok(())
+    })();
+
+    let journal = tracker.finish(
+        manifest.app_name.clone(),
+        Some(manifest_path.to_path_buf()),
+        manifest.purge.clone(),
+        manifest.support_contact.clone(),
+    );
+    let result = result.and_then(|_| {
+        let runtime = runtime_opt
+            .as_ref()
+            .ok_or_else(|| AppError::Message("Install runtime was not initialized".to_string()))?;
+        write_journal(&runtime.journal_path, &journal)?;
         trace_event(
             "install_journal_written",
             json!({"journal": runtime.journal_path, "actions": journal.actions.len()}),
@@ -1175,22 +1232,93 @@ fn install(
         finish_gui_progress(
             &mut gui_progress,
             &format!("{} installation completed successfully", manifest.app_name),
+            !automation,
         )?;
         if ui_mode == UiMode::Tui {
             println!("{} installation completed successfully", manifest.app_name);
         }
         Ok(())
-    })();
+    });
 
-    if let Err(err) = &result {
+    result.map_err(|err| {
         trace_event(
             "install_error",
             json!({"app_name": app_name, "error": err.to_string()}),
         );
-        let _ = fail_gui_progress(&mut gui_progress, &app_name, "install", err, !automation);
-    }
+        let cancelled = matches!(err, AppError::Cancelled);
+        let mut rollback_error_msg = None;
+        if let Some(runtime) = &runtime_opt {
+            if !journal.actions.is_empty() {
+                let write_res = (|| -> Result<(), AppError> {
+                    write_journal(&runtime.journal_path, &journal)?;
+                    let read_back = fs::read_to_string(&runtime.journal_path)?;
+                    let _: Journal = serde_json::from_str(&read_back)?;
+                    Ok(())
+                })();
+                match write_res {
+                    Ok(()) => {
+                        if cancelled && let Some(progress) = gui_progress.as_mut() {
+                            // The flag already tripped the install loop; clear it
+                            // so the rollback's own progress is not cancelled too.
+                            progress.clear_cancel_request();
+                            let _ = progress.log("Cancel requested - reverting changes...");
+                        }
+                        match uninstall(
+                            &runtime.journal_path,
+                            elevate,
+                            ui_mode,
+                            automation,
+                            sys,
+                            &mut gui_progress,
+                            logger,
+                            true,
+                        ) {
+                            Ok(()) => {
+                                trace_event(
+                                    "rollback_success",
+                                    json!({"journal": runtime.journal_path, "actions": journal.actions.len()}),
+                                );
+                            }
+                            Err(u_err) => {
+                                rollback_error_msg = Some(format!("Rollback failed: {u_err}"));
+                            }
+                        }
+                    }
+                    Err(w_err) => {
+                        rollback_error_msg =
+                            Some(format!("Could not write or verify journal.json: {w_err}"));
+                    }
+                }
+            }
+        }
 
-    result
+        if cancelled && rollback_error_msg.is_none() {
+            let _ = finish_gui_progress(
+                &mut gui_progress,
+                &format!("{app_name} installation cancelled. All changes were reverted."),
+                !automation,
+            );
+            return AppError::Cancelled;
+        }
+
+        let display_err = if let Some(r_err) = rollback_error_msg {
+            AppError::Message(format!(
+                "Installation failed: {err}. Additionally, rollback failed: {r_err}"
+            ))
+        } else {
+            err
+        };
+
+        let _ = fail_gui_progress(
+            &mut gui_progress,
+            &app_name,
+            "install",
+            &display_err,
+            manifest.support_contact.as_deref(),
+            !automation,
+        );
+        display_err
+    })
 }
 
 fn uninstall(
@@ -1199,26 +1327,45 @@ fn uninstall(
     ui_mode: UiMode,
     automation: bool,
     sys: &dyn Sys,
-    progress_override: Option<Box<dyn ProgressSink>>,
+    gui_progress: &mut Option<Box<dyn ProgressSink>>,
     logger: &Logger,
+    is_rollback: bool,
 ) -> Result<(), AppError> {
     let journal: Journal = serde_json::from_str(&fs::read_to_string(journal_path)?)?;
     trace_event(
-        "uninstall_start",
+        if is_rollback {
+            "rollback_start"
+        } else {
+            "uninstall_start"
+        },
         json!({"journal": journal_path, "app_name": &journal.app_name}),
     );
     let app_name = journal.app_name.clone();
-    let _progress = start_tui_progress(ui_mode, format!("Uninstalling {} ", journal.app_name));
-    let mut gui_progress = if progress_override.is_some() {
-        progress_override
+    let action_verb = if is_rollback {
+        "Reverting"
     } else {
-        start_gui_progress(
+        "Uninstalling"
+    };
+    let _progress = start_tui_progress(ui_mode, format!("{} {} ", action_verb, journal.app_name));
+    let uninstall_total = total_uninstall_steps(&journal);
+    // A rollback reuses the live install progress session passed in by the
+    // caller; only a standalone uninstall starts its own.
+    if gui_progress.is_none() {
+        *gui_progress = start_gui_progress(
             ui_mode,
             sys,
-            &format!("Uninstalling {}", journal.app_name),
-            total_uninstall_steps(&journal),
-        )?
-    };
+            &format!("{} {}", action_verb, journal.app_name),
+            if is_rollback {
+                Some(&journal.app_name)
+            } else {
+                None
+            },
+            None,
+            uninstall_total,
+            automation,
+            logger,
+        )?;
+    }
     let result = (|| -> Result<(), AppError> {
         let effective_logger = if ui_mode == UiMode::Tui {
             logger.quiet_clone()
@@ -1241,10 +1388,14 @@ fn uninstall(
             match action {
                 JournalAction::CreateDirectory { path } => {
                     advance_gui_progress_step(
-                        &mut gui_progress,
+                        gui_progress,
                         &mut progress_step,
+                        uninstall_total,
                         &format!("Removing directory {}", path.display()),
                     )?;
+                    if journal_path.starts_with(path) && journal_path.exists() {
+                        let _ = fs::remove_file(journal_path);
+                    }
                     win::remove_directory_if_exists(path, &effective_logger)?
                 }
                 JournalAction::CopyFile { destination, .. } => {
@@ -1256,8 +1407,9 @@ fn uninstall(
                         deferred_self_delete = Some(destination.clone());
                     } else {
                         advance_gui_progress_step(
-                            &mut gui_progress,
+                            gui_progress,
                             &mut progress_step,
+                            uninstall_total,
                             &format!("Removing file {}", destination.display()),
                         )?;
                         sys.remove_file_with_fallback(destination, &effective_logger)?
@@ -1272,8 +1424,9 @@ fn uninstall(
                         );
                     } else {
                         advance_gui_progress_step(
-                            &mut gui_progress,
+                            gui_progress,
                             &mut progress_step,
+                            uninstall_total,
                             &format!("Removing registry branch {}", subkey),
                         )?;
                         sys.delete_registry_tree(*root, subkey, &effective_logger)?
@@ -1281,8 +1434,9 @@ fn uninstall(
                 }
                 JournalAction::CreateShortcut { path } => {
                     advance_gui_progress_step(
-                        &mut gui_progress,
+                        gui_progress,
                         &mut progress_step,
+                        uninstall_total,
                         &format!("Removing shortcut {}", path.display()),
                     )?;
                     sys.remove_file_with_fallback(path, &effective_logger)?
@@ -1296,8 +1450,9 @@ fn uninstall(
         for branch in &journal.purge.registry_branches {
             let (root, subkey) = parse_registry_key(branch)?;
             advance_gui_progress_step(
-                &mut gui_progress,
+                gui_progress,
                 &mut progress_step,
+                uninstall_total,
                 &format!("Purging registry branch {}", branch),
             )?;
             sys.delete_registry_tree(root, &subkey, &effective_logger)?;
@@ -1305,8 +1460,9 @@ fn uninstall(
         for path in &journal.purge.paths {
             let resolved = resolver.resolve(path);
             advance_gui_progress_step(
-                &mut gui_progress,
+                gui_progress,
                 &mut progress_step,
+                uninstall_total,
                 &format!("Purging path {}", resolved.display()),
             )?;
             purge_path(&resolved, sys, &effective_logger)?;
@@ -1314,18 +1470,24 @@ fn uninstall(
 
         for (root, subkey) in deferred_uninstall_registry {
             advance_gui_progress_step(
-                &mut gui_progress,
+                gui_progress,
                 &mut progress_step,
+                uninstall_total,
                 &format!("Removing uninstall registration {}", subkey),
             )?;
             sys.delete_registry_tree(root, &subkey, &effective_logger)?;
         }
 
         if let Some(path) = deferred_self_delete {
-            finish_gui_progress(
-                &mut gui_progress,
-                &format!("Finalizing removal of {}", journal.app_name),
-            )?;
+            if !is_rollback {
+                // Never wait for the window here: the cleanup helper must be
+                // spawned promptly so self-deletion is not deferred on the user.
+                finish_gui_progress(
+                    gui_progress,
+                    &format!("Finalizing removal of {}", journal.app_name),
+                    false,
+                )?;
+            }
             sys.spawn_cleanup_helper(
                 &path,
                 path.parent(),
@@ -1335,10 +1497,13 @@ fn uninstall(
                 logger.json,
                 &effective_logger,
             )?;
-        } else {
+        } else if !is_rollback {
+            // During a rollback the install error handler owns the single
+            // terminal message on the shared progress session.
             finish_gui_progress(
-                &mut gui_progress,
+                gui_progress,
                 &format!("{} uninstalled successfully!", journal.app_name),
+                false,
             )?;
             if ui_mode == UiMode::Gui && !automation {
                 sys.ui_report_uninstall_success(&journal.app_name)?;
@@ -1346,16 +1511,39 @@ fn uninstall(
         }
 
         effective_logger.result("ok", json!({"journal":journal_path}));
-        trace_event("uninstall_ok", json!({"journal": journal_path}));
+        let _ = fs::remove_file(journal_path);
+        trace_event(
+            if is_rollback {
+                "rollback_ok"
+            } else {
+                "uninstall_ok"
+            },
+            json!({"journal": journal_path}),
+        );
         Ok(())
     })();
 
     if let Err(err) = &result {
         trace_event(
-            "uninstall_error",
+            if is_rollback {
+                "rollback_error"
+            } else {
+                "uninstall_error"
+            },
             json!({"app_name": app_name, "error": err.to_string()}),
         );
-        let _ = fail_gui_progress(&mut gui_progress, &app_name, "uninstall", err, !automation);
+        // Rollback errors bubble up so the install error handler can compose
+        // the single combined failure message on the shared session.
+        if !is_rollback {
+            let _ = fail_gui_progress(
+                gui_progress,
+                &app_name,
+                "uninstall",
+                err,
+                journal.support_contact.as_deref(),
+                !automation,
+            );
+        }
     }
 
     result
@@ -1663,7 +1851,11 @@ fn start_gui_progress(
     ui_mode: UiMode,
     sys: &dyn Sys,
     title: &str,
+    app_name: Option<&str>,
+    install_root: Option<&Path>,
     total_steps: usize,
+    automation: bool,
+    logger: &Logger,
 ) -> Result<Option<Box<dyn ProgressSink>>, AppError> {
     trace_event(
         "gui_progress_start",
@@ -1679,8 +1871,13 @@ fn start_gui_progress(
     if ui_mode == UiMode::Gui {
         Ok(Some(Box::new(ui::GuiProgress::start(
             title,
-            title,
+            app_name,
+            install_root
+                .map(|p| p.to_string_lossy().into_owned())
+                .as_deref(),
             total_steps.max(1),
+            automation,
+            logger,
         )?)))
     } else {
         Ok(None)
@@ -1690,14 +1887,25 @@ fn start_gui_progress(
 fn advance_gui_progress(
     gui_progress: &mut Option<Box<dyn ProgressSink>>,
     current_step: usize,
+    total_steps: usize,
     message: &str,
 ) -> Result<(), AppError> {
+    if gui_progress
+        .as_mut()
+        .is_some_and(|progress| progress.cancel_requested())
+    {
+        trace_event(
+            "cancel_request_detected",
+            json!({"current_step": current_step}),
+        );
+        return Err(AppError::Cancelled);
+    }
     trace_event(
         "progress",
         json!({"current_step": current_step, "message": message}),
     );
     if let Some(progress) = gui_progress.as_mut() {
-        progress.advance(current_step, message)?;
+        progress.advance(current_step, total_steps, message)?;
     }
     Ok(())
 }
@@ -1705,19 +1913,21 @@ fn advance_gui_progress(
 fn advance_gui_progress_step(
     gui_progress: &mut Option<Box<dyn ProgressSink>>,
     current_step: &mut usize,
+    total_steps: usize,
     message: &str,
 ) -> Result<(), AppError> {
     *current_step += 1;
-    advance_gui_progress(gui_progress, *current_step, message)
+    advance_gui_progress(gui_progress, *current_step, total_steps, message)
 }
 
 fn finish_gui_progress(
     gui_progress: &mut Option<Box<dyn ProgressSink>>,
     message: &str,
+    wait_for_close: bool,
 ) -> Result<(), AppError> {
     trace_event("progress_finish", json!({"message": message}));
     if let Some(progress) = gui_progress.as_mut() {
-        progress.finish(message)?;
+        progress.finish(message, wait_for_close)?;
     }
     Ok(())
 }
@@ -1727,6 +1937,7 @@ fn fail_gui_progress(
     app_name: &str,
     operation: &str,
     err: &AppError,
+    support_contact: Option<&str>,
     wait_for_close: bool,
 ) -> Result<(), AppError> {
     let message = format!("Error: program {app_name} failed to {operation} completely!");
@@ -1740,7 +1951,7 @@ fn fail_gui_progress(
             operation,
             &message,
             &err.to_string(),
-            error_errata(app_name, operation, err),
+            error_errata(app_name, operation, err, support_contact),
             wait_for_close,
         )?;
         mark_failure_ux_shown();
@@ -1756,7 +1967,12 @@ fn failure_ux_shown() -> bool {
     FAILURE_UX_SHOWN.load(Ordering::Relaxed)
 }
 
-fn error_errata(app_name: &str, operation: &str, err: &AppError) -> serde_json::Value {
+fn error_errata(
+    app_name: &str,
+    operation: &str,
+    err: &AppError,
+    support_contact: Option<&str>,
+) -> serde_json::Value {
     let timestamp_unix_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()
@@ -1766,6 +1982,7 @@ fn error_errata(app_name: &str, operation: &str, err: &AppError) -> serde_json::
         "app_name": app_name,
         "operation": operation,
         "timestamp_unix_ms": timestamp_unix_ms,
+        "support_contact": support_contact,
         "error": {
             "message": err.to_string(),
             "debug": format!("{err:?}"),
@@ -2319,6 +2536,7 @@ mod tests {
             shortcuts: Vec::new(),
             scripts: Vec::new(),
             purge: PurgeSpec::default(),
+            support_contact: None,
         };
 
         build_packaged_installer(
@@ -2403,6 +2621,7 @@ mod tests {
                 registry_branches: vec!["HKCU\\Software\\Tracked".to_string()],
                 paths: vec!["C:\\Apps\\Tracked".to_string()],
             },
+            None,
         );
 
         assert_eq!(journal.app_name, "Tracked App");
@@ -2438,9 +2657,10 @@ mod tests {
                 },
             ],
             purge: PurgeSpec {
-                registry_branches: vec!["HKCU\\Software\\SerdeApp".to_string()],
+                registry_branches: vec!["HKCU\\Software\\Serde".to_string()],
                 paths: vec!["C:\\Apps\\Serde\\cache".to_string()],
             },
+            support_contact: None,
         };
 
         let serialized = serde_json::to_string_pretty(&journal).unwrap();
@@ -2575,6 +2795,7 @@ path = '{LocalAppData}\Legacy\bin'
             shortcuts: Vec::new(),
             scripts: Vec::new(),
             purge: PurgeSpec::default(),
+            support_contact: None,
         };
 
         enforce_manifest_file_name(Path::new("SampleApp-install.toml"), &manifest).unwrap();
@@ -2628,6 +2849,7 @@ path = '{LocalAppData}\Legacy\bin'
                 registry_branches: vec!["HKCU\\Software\\NoSpaces".to_string()],
                 paths: vec!["{LocalAppData}\\NoSpaces".to_string()],
             },
+            support_contact: None,
         };
 
         enforce_manifest_field_spacing(&manifest).unwrap();
@@ -2827,18 +3049,28 @@ description = 'Description can have spaces'
         let mut step = 0;
 
         assert!(
-            start_gui_progress(UiMode::None, &WinSys, "No UI", 0)
-                .unwrap()
-                .is_none()
+            start_gui_progress(
+                UiMode::None,
+                &WinSys,
+                "No UI",
+                None,
+                None,
+                0,
+                false,
+                &quiet_logger()
+            )
+            .unwrap()
+            .is_none()
         );
-        advance_gui_progress(&mut progress, 1, "step").unwrap();
-        advance_gui_progress_step(&mut progress, &mut step, "next").unwrap();
-        finish_gui_progress(&mut progress, "done").unwrap();
+        advance_gui_progress(&mut progress, 1, 3, "step").unwrap();
+        advance_gui_progress_step(&mut progress, &mut step, 3, "next").unwrap();
+        finish_gui_progress(&mut progress, "done", false).unwrap();
         fail_gui_progress(
             &mut progress,
             "App",
             "install",
             &AppError::Message("boom".to_string()),
+            None,
             false,
         )
         .unwrap();
@@ -2871,12 +3103,18 @@ description = 'Description can have spaces'
 
     #[test]
     fn error_errata_contains_operation_error_and_process_context() {
-        let errata = error_errata("Errata App", "install", &AppError::Message("boom".into()));
+        let errata = error_errata(
+            "Errata App",
+            "install",
+            &AppError::Message("boom".into()),
+            Some("support@example.com"),
+        );
 
         assert_eq!(errata["schema"], "covenant_setup_errata_v1");
         assert_eq!(errata["app_name"], "Errata App");
         assert_eq!(errata["operation"], "install");
         assert_eq!(errata["error"]["message"], "boom");
+        assert_eq!(errata["support_contact"], "support@example.com");
         assert!(errata["process"]["pid"].as_u64().is_some());
         assert!(errata["process"]["args"].as_array().is_some());
     }
@@ -2901,6 +3139,7 @@ description = 'Description can have spaces'
                 registry_branches: vec!["HKCU\\Software\\Steps".to_string()],
                 paths: vec!["C:\\Apps\\Steps\\Cache".to_string()],
             },
+            support_contact: None,
         };
         assert_eq!(total_uninstall_steps(&journal), 6);
     }
@@ -2941,6 +3180,7 @@ description = 'Description can have spaces'
             manifest_path: None,
             actions: Vec::new(),
             purge: PurgeSpec::default(),
+            support_contact: None,
         };
         fs::write(&journal_path, serde_json::to_vec_pretty(&journal).unwrap()).unwrap();
 
@@ -2950,8 +3190,9 @@ description = 'Description can have spaces'
             UiMode::None,
             true,
             &WinSys,
-            None,
+            &mut None,
             &quiet_logger(),
+            false,
         )
         .unwrap();
     }
@@ -3129,6 +3370,7 @@ description = 'Description can have spaces'
                 destination: PathBuf::from("C:\\Program Files\\Sample\\payload.exe"),
             }],
             purge: PurgeSpec::default(),
+            support_contact: None,
         };
         assert!(journal_requires_admin(&journal, &resolver).unwrap());
 
@@ -3140,6 +3382,7 @@ description = 'Description can have spaces'
                 registry_branches: vec!["HKLM\\Software\\Sample".to_string()],
                 paths: vec![],
             },
+            support_contact: None,
         };
         assert!(journal_requires_admin(&journal, &resolver).unwrap());
     }
@@ -3172,6 +3415,7 @@ description = 'Description can have spaces'
                 registry_branches: vec!["HKCU\\Software\\UserApp".to_string()],
                 paths: vec!["C:\\Users\\Alice\\AppData\\Local\\UserApp".to_string()],
             },
+            support_contact: None,
         };
         assert!(!manifest_requires_admin(&manifest, &resolver).unwrap());
 
@@ -3189,6 +3433,7 @@ description = 'Description can have spaces'
                 },
             ],
             purge: manifest.purge,
+            support_contact: None,
         };
         assert!(!journal_requires_admin(&journal, &resolver).unwrap());
     }
@@ -3223,6 +3468,7 @@ description = 'Description can have spaces'
                 path: PathBuf::from("C:\\Program Files\\Sample\\Sample.lnk"),
             }],
             purge: PurgeSpec::default(),
+            support_contact: None,
         };
         assert!(journal_requires_admin(&journal, &resolver).unwrap());
 
@@ -3234,6 +3480,7 @@ description = 'Description can have spaces'
                 registry_branches: Vec::new(),
                 paths: vec!["C:\\Program Files\\Sample".to_string()],
             },
+            support_contact: None,
         };
         assert!(journal_requires_admin(&journal, &resolver).unwrap());
     }
@@ -3317,8 +3564,6 @@ description = 'Description can have spaces'
         },
         HasEmbeddedBundle,
         UiAvailable,
-        UiConfirmInstall(String),
-        UiReportSuccess(String),
         UiReportError(String),
         UiReportUninstallSuccess(String),
         UiPromptUninstallReboot(String),
@@ -3334,10 +3579,14 @@ description = 'Description can have spaces'
     enum SinkCall {
         Advance {
             current_step: usize,
+            total_steps: usize,
             message: String,
         },
         Log(String),
-        Finish(String),
+        Finish {
+            message: String,
+            wait_for_close: bool,
+        },
         Fail {
             app_name: String,
             operation: String,
@@ -3350,6 +3599,9 @@ description = 'Description can have spaces'
     #[derive(Default)]
     struct MockProgressSink {
         calls: Arc<Mutex<Vec<SinkCall>>>,
+        // When Some(n), cancel_requested() reports true once n Advance calls
+        // have been recorded; clear_cancel_request() resets it to None.
+        cancel_after_advances: Option<usize>,
     }
 
     impl MockProgressSink {
@@ -3360,12 +3612,27 @@ description = 'Description can have spaces'
         fn handle(&self) -> Arc<Mutex<Vec<SinkCall>>> {
             self.calls.clone()
         }
+
+        fn recorded_advances(&self) -> usize {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|call| matches!(call, SinkCall::Advance { .. }))
+                .count()
+        }
     }
 
     impl ProgressSink for MockProgressSink {
-        fn advance(&mut self, current_step: usize, message: &str) -> Result<(), AppError> {
+        fn advance(
+            &mut self,
+            current_step: usize,
+            total_steps: usize,
+            message: &str,
+        ) -> Result<(), AppError> {
             self.calls.lock().unwrap().push(SinkCall::Advance {
                 current_step,
+                total_steps,
                 message: message.to_string(),
             });
             Ok(())
@@ -3379,12 +3646,21 @@ description = 'Description can have spaces'
             Ok(())
         }
 
-        fn finish(&mut self, message: &str) -> Result<(), AppError> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(SinkCall::Finish(message.to_string()));
+        fn finish(&mut self, message: &str, wait_for_close: bool) -> Result<(), AppError> {
+            self.calls.lock().unwrap().push(SinkCall::Finish {
+                message: message.to_string(),
+                wait_for_close,
+            });
             Ok(())
+        }
+
+        fn cancel_requested(&mut self) -> bool {
+            self.cancel_after_advances
+                .is_some_and(|threshold| self.recorded_advances() >= threshold)
+        }
+
+        fn clear_cancel_request(&mut self) {
+            self.cancel_after_advances = None;
         }
 
         fn fail(
@@ -3412,12 +3688,12 @@ description = 'Description can have spaces'
         calls: Mutex<Vec<SysCall>>,
         is_elevated: Mutex<bool>,
         ui_available: Mutex<bool>,
-        ui_confirm_install: Mutex<bool>,
         ui_prompt_uninstall_reboot: Mutex<bool>,
         schedule_helper_self_cleanup: Mutex<bool>,
         prompt_reboot_tui: Mutex<bool>,
         has_embedded_bundle: Mutex<bool>,
         progress_sink_calls: Mutex<Option<Arc<Mutex<Vec<SinkCall>>>>>,
+        progress_sink_cancel_after: Mutex<Option<usize>>,
     }
 
     #[allow(dead_code)]
@@ -3436,10 +3712,6 @@ description = 'Description can have spaces'
 
         fn set_ui_available(&self, value: bool) {
             *self.ui_available.lock().unwrap() = value;
-        }
-
-        fn set_ui_confirm_install(&self, value: bool) {
-            *self.ui_confirm_install.lock().unwrap() = value;
         }
 
         fn set_ui_prompt_uninstall_reboot(&self, value: bool) {
@@ -3461,6 +3733,10 @@ description = 'Description can have spaces'
             // Box and stash a fresh sink each call to start_progress; use the
             // shared handle so tests can read the recorded calls.
             handle
+        }
+
+        fn set_cancel_after_advances(&self, threshold: usize) {
+            *self.progress_sink_cancel_after.lock().unwrap() = Some(threshold);
         }
     }
 
@@ -3560,22 +3836,6 @@ description = 'Description can have spaces'
             *self.ui_available.lock().unwrap()
         }
 
-        fn ui_confirm_install(&self, app_name: &str) -> Result<bool, AppError> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(SysCall::UiConfirmInstall(app_name.to_string()));
-            Ok(*self.ui_confirm_install.lock().unwrap())
-        }
-
-        fn ui_report_success(&self, app_name: &str) -> Result<(), AppError> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(SysCall::UiReportSuccess(app_name.to_string()));
-            Ok(())
-        }
-
         fn ui_report_error(&self, message: &str) -> Result<(), AppError> {
             self.calls
                 .lock()
@@ -3626,6 +3886,7 @@ description = 'Description can have spaces'
             if let Some(handle) = self.progress_sink_calls.lock().unwrap().clone() {
                 let sink = MockProgressSink {
                     calls: handle.clone(),
+                    cancel_after_advances: *self.progress_sink_cancel_after.lock().unwrap(),
                 };
                 Ok(Some(Box::new(sink) as Box<dyn ProgressSink>))
             } else {
@@ -3768,6 +4029,7 @@ description = 'Description can have spaces'
             shortcuts: Vec::new(),
             scripts: Vec::new(),
             purge: PurgeSpec::default(),
+            support_contact: None,
         };
         let runtime = InstallRuntime {
             journal_path: PathBuf::from("C:\\fake\\journal.json"),
@@ -3849,8 +4111,7 @@ description = 'Description can have spaces'
 
     // (i) — substitute: install error path emits ui_report_error via run_bundled_installer
     // is exercised at the install layer: a missing manifest yields AppError::Io and the
-    // automation flag suppresses the GUI fail UX. We assert the error propagates without
-    // calling ui_report_success.
+    // automation flag suppresses the GUI fail UX. We assert the error propagates.
     #[test]
     fn install_with_missing_manifest_propagates_error_without_success_ui() {
         let sys = MockSys::new();
@@ -3866,10 +4127,301 @@ description = 'Description can have spaces'
         )
         .unwrap_err();
         assert!(matches!(err, AppError::Io(_) | AppError::Message(_)));
+    }
+
+    #[test]
+    fn install_failure_triggers_partial_rollback() {
+        let temp = TestDir::new("install-rollback-test");
+        let manifest_path = temp.path().join("RollbackApp-install.toml");
+        let dir_to_create = temp.path().join("CreatedDir");
+
+        // Manifest specifies creating a directory, then copying a non-existent file (which will fail)
+        fs::write(
+            &manifest_path,
+            format!(
+                "app_name = 'RollbackApp'\ndirectories = {{ paths = ['{}'] }}\n[[files]]\nsource = 'nonexistent.txt'\ndestination = '{}\\\\file.txt'\n",
+                dir_to_create.display().to_string().replace("\\", "\\\\"),
+                dir_to_create.display().to_string().replace("\\", "\\\\")
+            ),
+        )
+        .unwrap();
+
+        let sys = MockSys::new();
+        sys.set_is_elevated(true);
+
+        let err = install(
+            &manifest_path,
+            None,
+            false,
+            UiMode::None,
+            true, // automation = true
+            &sys,
+            None,
+            &quiet_logger(),
+        )
+        .unwrap_err();
+
+        // The installation must have failed
         assert!(
-            !sys.recorded()
+            err.to_string().contains("nonexistent.txt")
+                || err.to_string().contains("cannot find")
+                || err.to_string().contains("system cannot find")
+        );
+
+        // The directory created during the partial install must have been rolled back (deleted)
+        assert!(!dir_to_create.exists());
+    }
+
+    #[test]
+    fn install_cancel_triggers_rollback_and_returns_cancelled() {
+        let temp = TestDir::new("install-cancel-test");
+        let manifest_path = temp.path().join("CancelApp-install.toml");
+        let dir_to_create = temp.path().join("CreatedDir");
+        let payload = temp.path().join("payload.txt");
+        fs::write(&payload, b"data").unwrap();
+
+        fs::write(
+            &manifest_path,
+            format!(
+                "app_name = 'CancelApp'\ndirectories = {{ paths = ['{}'] }}\n[[files]]\nsource = '{}'\ndestination = '{}\\\\file.txt'\n",
+                dir_to_create.display().to_string().replace("\\", "\\\\"),
+                payload.display().to_string().replace("\\", "\\\\"),
+                dir_to_create.display().to_string().replace("\\", "\\\\")
+            ),
+        )
+        .unwrap();
+
+        let sys = MockSys::new();
+        sys.set_is_elevated(true);
+        let sink_calls = sys.install_progress_sink();
+        // Trip the cancel flag once the first mutation step has been reported,
+        // as if the user clicked Cancel between steps.
+        sys.set_cancel_after_advances(1);
+
+        let err = install(
+            &manifest_path,
+            None,
+            false,
+            UiMode::None,
+            false,
+            &sys,
+            None,
+            &quiet_logger(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, AppError::Cancelled));
+        assert!(!dir_to_create.exists());
+
+        let calls = sink_calls.lock().unwrap().clone();
+        assert!(
+            calls
                 .iter()
-                .any(|c| matches!(c, SysCall::UiReportSuccess(_)))
+                .any(|c| matches!(c, SinkCall::Log(m) if m.contains("Cancel requested")))
+        );
+        assert!(calls.iter().any(
+            |c| matches!(c, SinkCall::Advance { message, .. } if message.contains("Removing directory"))
+        ));
+        let finishes: Vec<_> = calls
+            .iter()
+            .filter_map(|c| match c {
+                SinkCall::Finish {
+                    message,
+                    wait_for_close,
+                } => Some((message.clone(), *wait_for_close)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(finishes.len(), 1);
+        assert!(finishes[0].0.contains("cancelled"));
+        assert!(finishes[0].1, "non-automation finish must wait for close");
+        assert!(!calls.iter().any(|c| matches!(c, SinkCall::Fail { .. })));
+    }
+
+    #[test]
+    fn install_failure_rolls_back_through_same_sink_without_second_session() {
+        let temp = TestDir::new("install-rollback-same-sink");
+        let manifest_path = temp.path().join("SameSinkApp-install.toml");
+        let dir_to_create = temp.path().join("CreatedDir");
+
+        fs::write(
+            &manifest_path,
+            format!(
+                "app_name = 'SameSinkApp'\ndirectories = {{ paths = ['{}'] }}\n[[files]]\nsource = 'nonexistent.txt'\ndestination = '{}\\\\file.txt'\n",
+                dir_to_create.display().to_string().replace("\\", "\\\\"),
+                dir_to_create.display().to_string().replace("\\", "\\\\")
+            ),
+        )
+        .unwrap();
+
+        let sys = MockSys::new();
+        sys.set_is_elevated(true);
+        let sink_calls = sys.install_progress_sink();
+
+        let err = install(
+            &manifest_path,
+            None,
+            false,
+            UiMode::None,
+            true,
+            &sys,
+            None,
+            &quiet_logger(),
+        )
+        .unwrap_err();
+        assert!(!matches!(err, AppError::Cancelled));
+        assert!(!dir_to_create.exists());
+
+        // The rollback must reuse the live session instead of starting a second one.
+        let start_progress_calls = sys
+            .recorded()
+            .iter()
+            .filter(|c| matches!(c, SysCall::StartProgress { .. }))
+            .count();
+        assert_eq!(start_progress_calls, 1);
+
+        let calls = sink_calls.lock().unwrap().clone();
+        assert!(calls.iter().any(
+            |c| matches!(c, SinkCall::Advance { message, .. } if message.contains("Removing directory"))
+        ));
+        let fails = calls
+            .iter()
+            .filter(|c| matches!(c, SinkCall::Fail { .. }))
+            .count();
+        assert_eq!(fails, 1, "exactly one terminal fail message");
+        assert!(!calls.iter().any(|c| matches!(c, SinkCall::Finish { .. })));
+    }
+
+    #[test]
+    fn install_success_finish_wait_for_close_follows_automation_flag() {
+        for automation in [false, true] {
+            let temp = TestDir::new(if automation {
+                "install-finish-wait-auto"
+            } else {
+                "install-finish-wait-manual"
+            });
+            let manifest_path = temp.path().join("FinishApp-install.toml");
+            let dir_to_create = temp.path().join("CreatedDir");
+            fs::write(
+                &manifest_path,
+                format!(
+                    "app_name = 'FinishApp'\ndirectories = {{ paths = ['{}'] }}\n",
+                    dir_to_create.display().to_string().replace("\\", "\\\\")
+                ),
+            )
+            .unwrap();
+
+            let sys = MockSys::new();
+            sys.set_is_elevated(true);
+            let sink_calls = sys.install_progress_sink();
+
+            install(
+                &manifest_path,
+                None,
+                false,
+                UiMode::None,
+                automation,
+                &sys,
+                None,
+                &quiet_logger(),
+            )
+            .unwrap();
+
+            let calls = sink_calls.lock().unwrap().clone();
+            let wait_for_close = calls
+                .iter()
+                .find_map(|c| match c {
+                    SinkCall::Finish { wait_for_close, .. } => Some(*wait_for_close),
+                    _ => None,
+                })
+                .expect("finish recorded");
+            assert_eq!(wait_for_close, !automation);
+        }
+    }
+
+    #[test]
+    fn error_exit_code_maps_cancelled_elevation_and_default() {
+        assert_eq!(error_exit_code(&AppError::Cancelled), EXIT_CANCELLED);
+        assert_eq!(
+            error_exit_code(&AppError::Message(
+                "Elevation required to write to HKLM".into()
+            )),
+            EXIT_ELEVATION_REQUIRED
+        );
+        assert_eq!(
+            error_exit_code(&AppError::Message("boom".into())),
+            EXIT_OPERATION_FAILED
+        );
+    }
+
+    #[test]
+    fn advance_gui_progress_returns_cancelled_when_sink_requests() {
+        let handle = Arc::new(Mutex::new(Vec::new()));
+        let sink = MockProgressSink {
+            calls: handle.clone(),
+            cancel_after_advances: Some(0),
+        };
+        let mut progress: Option<Box<dyn ProgressSink>> = Some(Box::new(sink));
+
+        let err = advance_gui_progress(&mut progress, 1, 3, "step").unwrap_err();
+        assert!(matches!(err, AppError::Cancelled));
+        assert!(handle.lock().unwrap().is_empty());
+
+        progress.as_mut().unwrap().clear_cancel_request();
+        advance_gui_progress(&mut progress, 1, 3, "step").unwrap();
+        assert_eq!(handle.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn uninstall_cancel_mid_run_keeps_journal_and_reports_uninstall_failure() {
+        let temp = TestDir::new("uninstall-cancel");
+        let copied = temp.path().join("copied.bin");
+        fs::write(&copied, b"x").unwrap();
+        let journal_path = temp.path().join("journal.json");
+        let journal = Journal {
+            app_name: "CancelApp".to_string(),
+            manifest_path: None,
+            actions: vec![JournalAction::CopyFile {
+                source: temp.path().join("source.bin"),
+                destination: copied.clone(),
+            }],
+            purge: PurgeSpec::default(),
+            support_contact: None,
+        };
+        fs::write(&journal_path, serde_json::to_vec_pretty(&journal).unwrap()).unwrap();
+
+        let handle = Arc::new(Mutex::new(Vec::new()));
+        let sink = MockProgressSink {
+            calls: handle.clone(),
+            cancel_after_advances: Some(0),
+        };
+        let mut progress: Option<Box<dyn ProgressSink>> = Some(Box::new(sink));
+        let sys = MockSys::new();
+        sys.set_is_elevated(true);
+
+        let err = uninstall(
+            &journal_path,
+            false,
+            UiMode::None,
+            true,
+            &sys,
+            &mut progress,
+            &quiet_logger(),
+            false,
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, AppError::Cancelled));
+        assert!(
+            journal_path.exists(),
+            "journal must survive a cancelled uninstall"
+        );
+        assert!(copied.exists(), "no actions ran before the cancel tripped");
+        let calls = handle.lock().unwrap().clone();
+        assert!(
+            calls
+                .iter()
+                .any(|c| matches!(c, SinkCall::Fail { operation, .. } if operation == "uninstall"))
         );
     }
 
@@ -3934,6 +4486,7 @@ description = 'Description can have spaces'
                 registry_branches: vec!["HKCU\\Software\\Purged".to_string()],
                 paths: vec![],
             },
+            support_contact: None,
         };
         fs::write(&journal_path, serde_json::to_vec_pretty(&journal).unwrap()).unwrap();
         let sys = MockSys::new();
@@ -3944,8 +4497,9 @@ description = 'Description can have spaces'
             UiMode::None,
             true,
             &sys,
-            None,
+            &mut None,
             &quiet_logger(),
+            false,
         )
         .unwrap();
         let trees: Vec<_> = sys
@@ -3982,6 +4536,7 @@ description = 'Description can have spaces'
                 },
             ],
             purge: PurgeSpec::default(),
+            support_contact: None,
         };
         fs::write(&journal_path, serde_json::to_vec_pretty(&journal).unwrap()).unwrap();
         let sys = MockSys::new();
@@ -3992,8 +4547,9 @@ description = 'Description can have spaces'
             UiMode::None,
             true,
             &sys,
-            None,
+            &mut None,
             &quiet_logger(),
+            false,
         )
         .unwrap();
         let removed: Vec<_> = sys
@@ -4023,6 +4579,7 @@ description = 'Description can have spaces'
                 destination: current_exe.clone(),
             }],
             purge: PurgeSpec::default(),
+            support_contact: None,
         };
         fs::write(&journal_path, serde_json::to_vec_pretty(&journal).unwrap()).unwrap();
         let sys = MockSys::new();
@@ -4033,8 +4590,9 @@ description = 'Description can have spaces'
             UiMode::None,
             true,
             &sys,
-            None,
+            &mut None,
             &quiet_logger(),
+            false,
         )
         .unwrap();
         let helper = sys
@@ -4061,9 +4619,9 @@ description = 'Description can have spaces'
         let recorder = MockProgressSink::new();
         let handle = recorder.handle();
         let mut sink: Box<dyn ProgressSink> = Box::new(recorder);
-        sink.advance(2, "step 2").unwrap();
+        sink.advance(2, 5, "step 2").unwrap();
         sink.log("note").unwrap();
-        sink.finish("done").unwrap();
+        sink.finish("done", true).unwrap();
         sink.fail(
             "App",
             "install",
@@ -4077,10 +4635,13 @@ description = 'Description can have spaces'
         assert_eq!(calls.len(), 4);
         assert!(matches!(
             &calls[0],
-            SinkCall::Advance { current_step: 2, message } if message == "step 2"
+            SinkCall::Advance { current_step: 2, total_steps: 5, message } if message == "step 2"
         ));
         assert!(matches!(&calls[1], SinkCall::Log(s) if s == "note"));
-        assert!(matches!(&calls[2], SinkCall::Finish(s) if s == "done"));
+        assert!(matches!(
+            &calls[2],
+            SinkCall::Finish { message, wait_for_close } if message == "done" && *wait_for_close
+        ));
         assert!(matches!(
             &calls[3],
             SinkCall::Fail { app_name, operation, error, wait_for_close, .. }
@@ -4117,6 +4678,7 @@ description = 'Description can have spaces'
                 registry_branches: vec![],
                 paths: vec!["C:\\Apps\\Sample".to_string()],
             },
+            support_contact: None,
         }
     }
 

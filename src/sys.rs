@@ -53,8 +53,6 @@ pub(crate) trait Sys: Send + Sync {
 
     // (6) UI prompts (high level — the GuiProgress trait handles the live IPC)
     fn ui_available(&self) -> bool;
-    fn ui_confirm_install(&self, app_name: &str) -> Result<bool, AppError>;
-    fn ui_report_success(&self, app_name: &str) -> Result<(), AppError>;
     fn ui_report_error(&self, message: &str) -> Result<(), AppError>;
     fn ui_report_uninstall_success(&self, app_name: &str) -> Result<(), AppError>;
     fn ui_prompt_uninstall_reboot(&self, app_name: &str) -> Result<bool, AppError>;
@@ -147,14 +145,6 @@ impl Sys for WinSys {
 
     fn ui_available(&self) -> bool {
         crate::ui::is_available()
-    }
-
-    fn ui_confirm_install(&self, app_name: &str) -> Result<bool, AppError> {
-        crate::ui::confirm_install(app_name)
-    }
-
-    fn ui_report_success(&self, app_name: &str) -> Result<(), AppError> {
-        crate::ui::report_success(app_name)
     }
 
     fn ui_report_error(&self, message: &str) -> Result<(), AppError> {

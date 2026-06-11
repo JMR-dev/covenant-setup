@@ -1,0 +1,20 @@
+{"type":"init","title":"Installing SampleApp","message":"Preparing...","total_steps":8,"app_name":"SampleApp","install_dir":"C:\\Program Files\\SampleApp"}
+{"await_response":{"id":"welcome","expect":"install"}}
+{"wait_ms":200}
+{"type":"progress","current_step":1,"total_steps":8,"message":"Creating directories"}
+{"wait_ms":200}
+{"type":"progress","current_step":2,"total_steps":8,"message":"Copying files"}
+{"wait_ms":200}
+{"type":"progress","current_step":3,"total_steps":8,"message":"Writing registry keys"}
+{"wait_ms":200}
+{"type":"progress","current_step":4,"total_steps":8,"message":"Creating shortcuts"}
+{"wait_ms":200}
+{"type":"progress","current_step":5,"total_steps":8,"message":"Running post-install scripts"}
+{"type":"log","message":"Executing custom action: register service"}
+{"wait_ms":200}
+{"type":"progress","current_step":6,"total_steps":8,"message":"Creating uninstaller"}
+{"wait_ms":200}
+{"type":"progress","current_step":7,"total_steps":8,"message":"Registering with Add/Remove Programs"}
+{"wait_ms":200}
+{"type":"finish","message":"SampleApp installed successfully"}
+{"type":"close"}

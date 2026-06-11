@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/authoring-ui.Tests/">
+    <Project Path="authoring-ui.Tests/Covenant.Setup.Authoring.Tests.csproj" />
+  </Folder>
+  <Folder Name="/authoring-ui/">
+    <Project Path="authoring-ui/Covenant.Setup.Authoring.csproj" />
+  </Folder>
+  <Folder Name="/ui/">
+    <Project Path="ui/Covenant.Setup.Ui.Tests/Covenant.Setup.Ui.Tests.csproj" />
+    <Project Path="ui/Covenant.Setup.Ui/Covenant.Setup.Ui.csproj">
+      <Platform Solution="*|Any CPU" Project="x64" />
+    </Project>
+  </Folder>
+</Solution>

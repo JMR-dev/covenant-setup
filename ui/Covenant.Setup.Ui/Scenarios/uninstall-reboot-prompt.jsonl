@@ -1,0 +1,14 @@
+# uninstall-reboot-prompt: uninstallation followed by reboot request
+{"type":"init","title":"Uninstalling SampleApp","message":"Preparing uninstallation...","total_steps":8}
+{"wait_ms":200}
+{"type":"progress","current_step":7,"total_steps":8,"message":"Deregistering from Add/Remove Programs"}
+{"wait_ms":200}
+{"type":"progress","current_step":6,"total_steps":8,"message":"Removing uninstaller"}
+{"wait_ms":200}
+{"type":"progress","current_step":2,"total_steps":8,"message":"Deleting files"}
+{"wait_ms":200}
+{"type":"progress","current_step":1,"total_steps":8,"message":"Removing directories"}
+{"wait_ms":400}
+{"type":"prompt","id":"p2","title":"covenant-setup","message":"SampleApp uninstalled successfully! Some files from the program still remain on your computer. To complete removal of these files, restart your computer now.","buttons":"yes_no","icon":"information"}
+{"await_response":{"id":"p2","expect":"yes"}}
+{"type":"close"}

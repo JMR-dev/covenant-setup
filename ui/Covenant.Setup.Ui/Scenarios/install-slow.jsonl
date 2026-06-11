@@ -1,0 +1,56 @@
+# install-slow: long visual test with many log lines
+{"type":"init","title":"Installing SampleApp","message":"Preparing to install SampleApp...","total_steps":12,"app_name":"SampleApp","install_dir":"C:\\Program Files\\SampleApp"}
+{"await_response":{"id":"welcome","expect":"install"}}
+{"wait_ms":800}
+{"type":"progress","current_step":1,"total_steps":12,"message":"Checking system pre-requisites"}
+{"type":"log","message":"Checking OS version..."}
+{"type":"log","message":"OS version is Windows 10/11"}
+{"type":"log","message":"Checking available disk space..."}
+{"type":"log","message":"Found 45.2 GB free space"}
+{"wait_ms":1000}
+{"type":"progress","current_step":2,"total_steps":12,"message":"Acquiring locks"}
+{"type":"log","message":"Ensuring no other installer instances are running..."}
+{"wait_ms":600}
+{"type":"progress","current_step":3,"total_steps":12,"message":"Creating directory structure"}
+{"type":"log","message":"Creating C:\\Program Files\\SampleApp"}
+{"type":"log","message":"Creating C:\\Program Files\\SampleApp\\bin"}
+{"type":"log","message":"Creating C:\\Program Files\\SampleApp\\data"}
+{"wait_ms":1200}
+{"type":"progress","current_step":4,"total_steps":12,"message":"Extracting core binaries"}
+{"type":"log","message":"Extracting SampleApp.exe..."}
+{"type":"log","message":"Extracting SampleApp.Core.dll..."}
+{"type":"log","message":"Extracting config.json..."}
+{"wait_ms":1500}
+{"type":"progress","current_step":5,"total_steps":12,"message":"Extracting asset assets"}
+{"type":"log","message":"Extracting background.png..."}
+{"type":"log","message":"Extracting logo.ico..."}
+{"wait_ms":900}
+{"type":"progress","current_step":6,"total_steps":12,"message":"Writing configuration"}
+{"type":"log","message":"Updating local config with default parameters..."}
+{"wait_ms":500}
+{"type":"progress","current_step":7,"total_steps":12,"message":"Configuring environment variables"}
+{"type":"log","message":"Adding C:\\Program Files\\SampleApp\\bin to User PATH"}
+{"wait_ms":700}
+{"type":"progress","current_step":8,"total_steps":12,"message":"Creating registry entries"}
+{"type":"log","message":"Creating registry key HKLM\\Software\\SampleApp"}
+{"type":"log","message":"Setting InstallPath = C:\\Program Files\\SampleApp"}
+{"type":"log","message":"Setting Version = 1.0.0"}
+{"wait_ms":1100}
+{"type":"progress","current_step":9,"total_steps":12,"message":"Creating shortcuts"}
+{"type":"log","message":"Creating desktop shortcut for SampleApp..."}
+{"type":"log","message":"Creating Start Menu shortcut for SampleApp..."}
+{"wait_ms":800}
+{"type":"progress","current_step":10,"total_steps":12,"message":"Configuring services"}
+{"type":"log","message":"Registering SampleAppService..."}
+{"type":"log","message":"Setting service startup to Automatic..."}
+{"wait_ms":1300}
+{"type":"progress","current_step":11,"total_steps":12,"message":"Creating uninstaller"}
+{"type":"log","message":"Generating uninstall.exe..."}
+{"type":"log","message":"Creating uninstall registry keys for ARP..."}
+{"wait_ms":1000}
+{"type":"progress","current_step":12,"total_steps":12,"message":"Finalizing setup"}
+{"type":"log","message":"Cleaning up temporary files..."}
+{"type":"log","message":"Installation check completed successfully."}
+{"wait_ms":800}
+{"type":"finish","message":"Installation completed successfully! Welcome to SampleApp."}
+{"type":"close"}

@@ -1,0 +1,18 @@
+{"type":"init","title":"Uninstalling SampleApp","message":"Preparing uninstallation...","total_steps":8}
+{"wait_ms":200}
+{"type":"progress","current_step":7,"total_steps":8,"message":"Deregistering from Add/Remove Programs"}
+{"wait_ms":200}
+{"type":"progress","current_step":6,"total_steps":8,"message":"Removing uninstaller"}
+{"wait_ms":200}
+{"type":"progress","current_step":5,"total_steps":8,"message":"Reverting custom actions"}
+{"wait_ms":200}
+{"type":"progress","current_step":4,"total_steps":8,"message":"Removing shortcuts"}
+{"wait_ms":200}
+{"type":"progress","current_step":3,"total_steps":8,"message":"Deleting registry keys"}
+{"wait_ms":200}
+{"type":"progress","current_step":2,"total_steps":8,"message":"Deleting files"}
+{"wait_ms":200}
+{"type":"progress","current_step":1,"total_steps":8,"message":"Removing directories"}
+{"wait_ms":200}
+{"type":"finish","message":"SampleApp uninstalled successfully"}
+{"type":"close"}

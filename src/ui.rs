@@ -1,8 +1,8 @@
-use crate::AppError;
+use crate::{AppError, Logger, win};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::windows::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{self, Child, Command};
@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const UI_EXE_NAME: &str = "Covenant.Setup.Ui.exe";
+// Must match the bundle format written by write_ui_bundle in build.rs.
 const UI_BUNDLE_MAGIC: &[u8] = b"COVENANT_SETUP_UI_BUNDLE_V1\n";
 
 #[cfg(covenant_setup_embedded_ui)]
@@ -31,9 +32,14 @@ pub fn is_available() -> bool {
 /// uninstall code can be unit-tested with a recording mock instead of
 /// spawning the real C# UI.
 pub trait ProgressSink: Send {
-    fn advance(&mut self, current_step: usize, message: &str) -> Result<(), AppError>;
+    fn advance(
+        &mut self,
+        current_step: usize,
+        total_steps: usize,
+        message: &str,
+    ) -> Result<(), AppError>;
     fn log(&mut self, message: &str) -> Result<(), AppError>;
-    fn finish(&mut self, message: &str) -> Result<(), AppError>;
+    fn finish(&mut self, message: &str, wait_for_close: bool) -> Result<(), AppError>;
     fn fail(
         &mut self,
         app_name: &str,
@@ -43,19 +49,28 @@ pub trait ProgressSink: Send {
         errata: Value,
         wait_for_close: bool,
     ) -> Result<(), AppError>;
+    fn cancel_requested(&mut self) -> bool {
+        false
+    }
+    fn clear_cancel_request(&mut self) {}
 }
 
 impl ProgressSink for GuiProgress {
-    fn advance(&mut self, current_step: usize, message: &str) -> Result<(), AppError> {
-        GuiProgress::advance(self, current_step, message)
+    fn advance(
+        &mut self,
+        current_step: usize,
+        total_steps: usize,
+        message: &str,
+    ) -> Result<(), AppError> {
+        GuiProgress::advance(self, current_step, total_steps, message)
     }
 
     fn log(&mut self, message: &str) -> Result<(), AppError> {
         GuiProgress::log(self, message)
     }
 
-    fn finish(&mut self, message: &str) -> Result<(), AppError> {
-        GuiProgress::finish(self, message)
+    fn finish(&mut self, message: &str, wait_for_close: bool) -> Result<(), AppError> {
+        GuiProgress::finish(self, message, wait_for_close)
     }
 
     fn fail(
@@ -77,33 +92,90 @@ impl ProgressSink for GuiProgress {
             wait_for_close,
         )
     }
+
+    fn cancel_requested(&mut self) -> bool {
+        if !self.cancel_seen {
+            self.cancel_seen = self.session.poll_cancel_request(&self.logger);
+        }
+        self.cancel_seen
+    }
+
+    fn clear_cancel_request(&mut self) {
+        self.cancel_seen = false;
+    }
 }
 
 pub struct GuiProgress {
     session: CSharpUiSession,
-    total_steps: usize,
+    logger: Logger,
+    cancel_seen: bool,
 }
 
 impl GuiProgress {
-    pub fn start(title: &str, initial_message: &str, total_steps: usize) -> Result<Self, AppError> {
+    pub fn start(
+        title: &str,
+        app_name: Option<&str>,
+        install_root: Option<&str>,
+        total_steps: usize,
+        automation: bool,
+        logger: &Logger,
+    ) -> Result<Self, AppError> {
         let mut session = CSharpUiSession::start()?;
+
+        let branding_image = if let (Some(_), Some(root_path)) = (app_name, install_root) {
+            let root = Path::new(root_path);
+            ["branding.png", "banner.png", "logo.png"]
+                .iter()
+                .map(|name| root.join(name))
+                .find(|path| path.is_file())
+                .map(|path| path.to_string_lossy().into_owned())
+        } else {
+            None
+        };
+
         session.send(&json!({
             "type": "init",
             "title": title,
-            "message": initial_message,
+            "app_name": app_name,
+            "install_dir": install_root,
+            "branding_image": branding_image,
             "total_steps": total_steps.max(1),
+            "automation": automation,
         }))?;
+
+        #[derive(Deserialize)]
+        struct WelcomeResponse {
+            #[serde(rename = "type")]
+            message_type: String,
+            result: Option<String>,
+        }
+
+        if app_name.is_some() && install_root.is_some() && !automation {
+            let response: WelcomeResponse = session.read()?;
+            if response.message_type != "welcome_response"
+                || response.result.as_deref() != Some("install")
+            {
+                return Err(AppError::CancelledByUser);
+            }
+        }
+
         Ok(Self {
             session,
-            total_steps: total_steps.max(1),
+            logger: logger.clone(),
+            cancel_seen: false,
         })
     }
 
-    pub fn advance(&mut self, current_step: usize, message: &str) -> Result<(), AppError> {
+    pub fn advance(
+        &mut self,
+        current_step: usize,
+        total_steps: usize,
+        message: &str,
+    ) -> Result<(), AppError> {
         self.session.send(&json!({
             "type": "progress",
             "current_step": current_step,
-            "total_steps": self.total_steps,
+            "total_steps": total_steps.max(1),
             "message": message,
         }))
     }
@@ -115,11 +187,15 @@ impl GuiProgress {
         }))
     }
 
-    pub fn finish(&mut self, message: &str) -> Result<(), AppError> {
+    pub fn finish(&mut self, message: &str, wait_for_close: bool) -> Result<(), AppError> {
         self.session.send(&json!({
             "type": "finish",
             "message": message,
-        }))
+        }))?;
+        if wait_for_close {
+            self.session.wait_for_exit()?;
+        }
+        Ok(())
     }
 
     pub fn fail(
@@ -144,28 +220,6 @@ impl GuiProgress {
         }
         Ok(())
     }
-}
-
-pub fn confirm_install(app_name: &str) -> Result<bool, AppError> {
-    crate::trace_event("ui_prompt_confirm_install", json!({"app_name": app_name}));
-    let result = prompt(
-        "covenant-setup",
-        &format!("Install {app_name} now?"),
-        PromptButtons::OkCancel,
-        PromptIcon::Information,
-    )?;
-    Ok(matches!(result, PromptResult::Ok))
-}
-
-pub fn report_success(app_name: &str) -> Result<(), AppError> {
-    crate::trace_event("ui_prompt_report_success", json!({"app_name": app_name}));
-    let _ = prompt(
-        "covenant-setup",
-        &format!("{app_name} installation completed successfully"),
-        PromptButtons::Ok,
-        PromptIcon::Information,
-    )?;
-    Ok(())
 }
 
 pub fn report_error(message: &str) -> Result<(), AppError> {
@@ -236,7 +290,6 @@ fn prompt(
 
 enum PromptButtons {
     Ok,
-    OkCancel,
     YesNo,
 }
 
@@ -244,7 +297,6 @@ impl PromptButtons {
     fn as_str(&self) -> &'static str {
         match self {
             Self::Ok => "ok",
-            Self::OkCancel => "ok_cancel",
             Self::YesNo => "yes_no",
         }
     }
@@ -291,6 +343,7 @@ struct CSharpUiSession {
     child: Child,
     reader: BufReader<fs::File>,
     writer: fs::File,
+    pending_input: Vec<u8>,
     cleanup_root: Option<PathBuf>,
     closed: bool,
     child_exited: bool,
@@ -322,6 +375,7 @@ impl CSharpUiSession {
             child,
             reader: BufReader::new(pipe),
             writer,
+            pending_input: Vec::new(),
             cleanup_root,
             closed: false,
             child_exited: false,
@@ -358,6 +412,47 @@ impl CSharpUiSession {
             json!({"pid": self.child.id(), "status": status.code()}),
         );
         Ok(())
+    }
+
+    /// Drains any complete UI->engine lines and reports whether one was a
+    /// `cancel_request`. Never blocks: bytes are only pulled after
+    /// PeekNamedPipe says they are available, because a read left pending on
+    /// this synchronous pipe handle would serialize against (and stall) the
+    /// engine's progress writes on the same handle.
+    fn poll_cancel_request(&mut self, logger: &Logger) -> bool {
+        let mut saw_cancel = false;
+        loop {
+            let buffered = self.reader.buffer().len();
+            if buffered > 0 {
+                // Leftover bytes the welcome-handshake read pulled in.
+                let chunk = self.reader.buffer().to_vec();
+                self.reader.consume(buffered);
+                self.pending_input.extend_from_slice(&chunk);
+            } else {
+                let available = win::peek_named_pipe_available(self.reader.get_ref(), logger)
+                    .unwrap_or(0) as usize;
+                if available == 0 {
+                    break;
+                }
+                let mut chunk = vec![0u8; available];
+                match self.reader.get_mut().read(&mut chunk) {
+                    Ok(count) if count > 0 => self.pending_input.extend_from_slice(&chunk[..count]),
+                    _ => break,
+                }
+            }
+
+            while let Some(newline) = self.pending_input.iter().position(|byte| *byte == b'\n') {
+                let line: Vec<u8> = self.pending_input.drain(..=newline).collect();
+                let line = String::from_utf8_lossy(&line);
+                if let Ok(value) = serde_json::from_str::<Value>(&line)
+                    && value.get("type").and_then(Value::as_str) == Some("cancel_request")
+                {
+                    crate::trace_event("ui_cancel_request", json!({}));
+                    saw_cancel = true;
+                }
+            }
+        }
+        saw_cancel
     }
 }
 
@@ -480,30 +575,17 @@ fn extract_ui_bundle(bytes: &[u8]) -> Result<PreparedUiExe, AppError> {
             break;
         }
 
-        let path_end = checked_bundle_end(cursor, path_len)?;
-        if path_end > bytes.len() {
-            return Err(AppError::Message(
-                "Embedded C# UI bundle path exceeds bundle size".into(),
-            ));
-        }
-        let relative_path = std::str::from_utf8(&bytes[cursor..path_end]).map_err(|_| {
+        let relative_path = std::str::from_utf8(take_bundle_bytes(bytes, &mut cursor, path_len)?)
+            .map_err(|_| {
             AppError::Message("Embedded C# UI bundle path is not valid UTF-8".into())
         })?;
-        cursor = path_end;
-
-        let data_end = checked_bundle_end(cursor, data_len)?;
-        if data_end > bytes.len() {
-            return Err(AppError::Message(
-                "Embedded C# UI bundle file exceeds bundle size".into(),
-            ));
-        }
+        let data = take_bundle_bytes(bytes, &mut cursor, data_len)?;
 
         let output_path = bundle_output_path(&root, relative_path)?;
         if let Some(parent) = output_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(output_path, &bytes[cursor..data_end])?;
-        cursor = data_end;
+        fs::write(output_path, data)?;
     }
 
     let path = root.join(UI_EXE_NAME);
@@ -526,41 +608,31 @@ fn sidecar_ui_exe() -> Option<PathBuf> {
 }
 
 fn read_bundle_u32(bytes: &[u8], cursor: &mut usize) -> Result<u32, AppError> {
-    let end = checked_bundle_end(*cursor, std::mem::size_of::<u32>())?;
-    if end > bytes.len() {
-        return Err(AppError::Message(
-            "Embedded C# UI bundle ended unexpectedly".into(),
-        ));
-    }
-    let value = u32::from_le_bytes(
-        bytes[*cursor..end]
-            .try_into()
-            .map_err(|_| AppError::Message("Invalid embedded C# UI bundle u32".into()))?,
-    );
-    *cursor = end;
-    Ok(value)
+    Ok(u32::from_le_bytes(
+        take_bundle_bytes(bytes, cursor, 4)?.try_into().unwrap(),
+    ))
 }
 
 fn read_bundle_u64(bytes: &[u8], cursor: &mut usize) -> Result<u64, AppError> {
-    let end = checked_bundle_end(*cursor, std::mem::size_of::<u64>())?;
-    if end > bytes.len() {
-        return Err(AppError::Message(
-            "Embedded C# UI bundle ended unexpectedly".into(),
-        ));
-    }
-    let value = u64::from_le_bytes(
-        bytes[*cursor..end]
-            .try_into()
-            .map_err(|_| AppError::Message("Invalid embedded C# UI bundle u64".into()))?,
-    );
-    *cursor = end;
-    Ok(value)
+    Ok(u64::from_le_bytes(
+        take_bundle_bytes(bytes, cursor, 8)?.try_into().unwrap(),
+    ))
 }
 
-fn checked_bundle_end(start: usize, len: usize) -> Result<usize, AppError> {
-    start
+/// Advances `cursor` past the next `len` bytes and returns them, or errors if
+/// the bundle is truncated.
+fn take_bundle_bytes<'a>(
+    bytes: &'a [u8],
+    cursor: &mut usize,
+    len: usize,
+) -> Result<&'a [u8], AppError> {
+    let end = cursor
         .checked_add(len)
-        .ok_or_else(|| AppError::Message("Embedded C# UI bundle length overflow".into()))
+        .filter(|end| *end <= bytes.len())
+        .ok_or_else(|| AppError::Message("Embedded C# UI bundle ended unexpectedly".into()))?;
+    let slice = &bytes[*cursor..end];
+    *cursor = end;
+    Ok(slice)
 }
 
 fn bundle_output_path(root: &Path, relative_path: &str) -> Result<PathBuf, AppError> {
@@ -607,7 +679,6 @@ mod tests {
     #[test]
     fn prompt_button_and_icon_names_match_protocol() {
         assert_eq!(PromptButtons::Ok.as_str(), "ok");
-        assert_eq!(PromptButtons::OkCancel.as_str(), "ok_cancel");
         assert_eq!(PromptButtons::YesNo.as_str(), "yes_no");
         assert_eq!(PromptIcon::Information.as_str(), "information");
         assert_eq!(PromptIcon::Error.as_str(), "error");

@@ -51,4 +51,30 @@ public class ProgramTests
     {
         Assert.Null(Program.ReadPipeName(Array.Empty<string>()));
     }
+
+    [Fact]
+    public void ReadMockScenario_returns_value_following_mock_flag()
+    {
+        var scenario = Program.ReadMockScenario(new[] { "--mock", "happy" });
+        Assert.Equal("happy", scenario);
+    }
+
+    [Fact]
+    public void ReadMockScenario_is_case_insensitive_on_flag()
+    {
+        var scenario = Program.ReadMockScenario(new[] { "--MOCK", "install-happy" });
+        Assert.Equal("install-happy", scenario);
+    }
+
+    [Fact]
+    public void ReadMockScenario_returns_null_when_flag_missing()
+    {
+        Assert.Null(Program.ReadMockScenario(new[] { "--other", "x" }));
+    }
+
+    [Fact]
+    public void ReadMockScenario_returns_null_when_flag_is_last_arg_with_no_value()
+    {
+        Assert.Null(Program.ReadMockScenario(new[] { "--mock" }));
+    }
 }

@@ -1,0 +1,11 @@
+# install-fail-errata: failure with errata details
+{"type":"init","title":"Installing SampleApp","message":"Preparing...","total_steps":8,"app_name":"SampleApp","install_dir":"C:\\Program Files\\SampleApp"}
+{"await_response":{"id":"welcome","expect":"install"}}
+{"wait_ms": 200}
+{"type":"progress","current_step":1,"total_steps":8,"message":"Creating directories"}
+{"wait_ms": 200}
+{"type":"progress","current_step":2,"total_steps":8,"message":"Copying files"}
+{"wait_ms": 200}
+{"type":"progress","current_step":3,"total_steps":8,"message":"Writing registry keys"}
+{"wait_ms": 200}
+{"type":"fail","app_name":"SampleApp","operation":"install","message":"Installation failed during registry configuration.","error":"Registry write access denied (0x80070005)","errata":{"schema":"covenant_setup_errata_v1","app_name":"SampleApp","operation":"install","timestamp_unix_ms":1770000000000,"error":{"message":"Registry write access denied (0x80070005)","debug":"AccessViolationException: Attempted to write protected memory."},"process":{"pid":9999,"exe":"Covenant.Setup.Ui.exe","current_dir":"C:\\workspace\\covenant-setup","args":["--pipe","test-pipe"],"trace_dir":"C:\\temp"}}}

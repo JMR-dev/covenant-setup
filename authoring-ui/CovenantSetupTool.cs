@@ -113,47 +113,16 @@ internal static class CovenantSetupToolValidator
             return Invalid("Pick a valid covenant-setup executable.");
         }
 
-        var output = new StringBuilder();
-        var error = new StringBuilder();
-        using var process = new Process
-        {
-            StartInfo = CreateHelpStartInfo(fullPath),
-            EnableRaisingEvents = true
-        };
-
-        process.OutputDataReceived += (_, args) =>
-        {
-            if (args.Data is not null)
-            {
-                output.AppendLine(args.Data);
-            }
-        };
-        process.ErrorDataReceived += (_, args) =>
-        {
-            if (args.Data is not null)
-            {
-                error.AppendLine(args.Data);
-            }
-        };
-
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(5));
 
+        ProcessRunResult run;
         try
         {
-            if (!process.Start())
-            {
-                return Invalid("Pick a valid covenant-setup executable.");
-            }
-
-            process.BeginOutputReadLine();
-            process.BeginErrorReadLine();
-            await process.WaitForExitAsync(timeout.Token);
-            process.WaitForExit();
+            run = await ProcessRunner.RunAsync(CreateHelpStartInfo(fullPath), timeout.Token);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            TryKill(process);
             return Invalid("The selected executable did not respond to the covenant-setup help command.");
         }
         catch (Exception ex)
@@ -163,8 +132,8 @@ internal static class CovenantSetupToolValidator
 
         var combinedOutput = string.Join(
             Environment.NewLine,
-            new[] { output.ToString(), error.ToString() }.Where(part => !string.IsNullOrWhiteSpace(part)));
-        if (process.ExitCode == 0 && LooksLikeCovenantSetupHelp(combinedOutput))
+            new[] { run.Output, run.Error }.Where(part => !string.IsNullOrWhiteSpace(part)));
+        if (run.ExitCode == 0 && LooksLikeCovenantSetupHelp(combinedOutput))
         {
             return new ToolValidationResult(true, new CovenantSetupTool(fullPath), "Packaging enabled: " + fullPath);
         }
@@ -194,21 +163,6 @@ internal static class CovenantSetupToolValidator
 
     private static ToolValidationResult Invalid(string message) =>
         new(false, null, message);
-
-    private static void TryKill(Process process)
-    {
-        try
-        {
-            if (!process.HasExited)
-            {
-                process.Kill(entireProcessTree: true);
-            }
-        }
-        catch
-        {
-            // Best effort; the caller reports validation failure either way.
-        }
-    }
 }
 
 internal static class CovenantSetupPackager
@@ -221,38 +175,14 @@ internal static class CovenantSetupPackager
     {
         Directory.CreateDirectory(outputDirectory);
 
-        var output = new StringBuilder();
-        var error = new StringBuilder();
-        using var process = new Process
-        {
-            StartInfo = CreateStartInfo(tool, manifestPath, outputDirectory),
-            EnableRaisingEvents = true
-        };
-
-        process.OutputDataReceived += (_, args) =>
-        {
-            if (args.Data is not null)
-            {
-                output.AppendLine(args.Data);
-            }
-        };
-        process.ErrorDataReceived += (_, args) =>
-        {
-            if (args.Data is not null)
-            {
-                error.AppendLine(args.Data);
-            }
-        };
-
-        process.Start();
-        process.BeginOutputReadLine();
-        process.BeginErrorReadLine();
-        await process.WaitForExitAsync(cancellationToken);
+        var run = await ProcessRunner.RunAsync(
+            CreateStartInfo(tool, manifestPath, outputDirectory),
+            cancellationToken);
         return new PackageResult(
-            process.ExitCode == 0,
-            process.ExitCode,
-            output.ToString().Trim(),
-            error.ToString().Trim());
+            run.ExitCode == 0,
+            run.ExitCode,
+            run.Output.Trim(),
+            run.Error.Trim());
     }
 
     internal static ProcessStartInfo CreateStartInfo(
@@ -278,5 +208,78 @@ internal static class CovenantSetupPackager
         startInfo.ArgumentList.Add("--output");
         startInfo.ArgumentList.Add(outputDirectory);
         return startInfo;
+    }
+}
+
+internal sealed record ProcessRunResult(int ExitCode, string Output, string Error);
+
+internal static class ProcessRunner
+{
+    /// <summary>
+    /// Runs a redirected-output process to completion, killing the process
+    /// tree if the token cancels before it exits.
+    /// </summary>
+    public static async Task<ProcessRunResult> RunAsync(
+        ProcessStartInfo startInfo,
+        CancellationToken cancellationToken)
+    {
+        var output = new StringBuilder();
+        var error = new StringBuilder();
+        using var process = new Process
+        {
+            StartInfo = startInfo,
+            EnableRaisingEvents = true
+        };
+
+        process.OutputDataReceived += (_, args) =>
+        {
+            if (args.Data is not null)
+            {
+                output.AppendLine(args.Data);
+            }
+        };
+        process.ErrorDataReceived += (_, args) =>
+        {
+            if (args.Data is not null)
+            {
+                error.AppendLine(args.Data);
+            }
+        };
+
+        if (!process.Start())
+        {
+            throw new InvalidOperationException("The process failed to start.");
+        }
+
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
+        try
+        {
+            await process.WaitForExitAsync(cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            TryKill(process);
+            throw;
+        }
+
+        // The synchronous wait flushes the async output readers.
+        process.WaitForExit();
+        return new ProcessRunResult(process.ExitCode, output.ToString(), error.ToString());
+    }
+
+    private static void TryKill(Process process)
+    {
+        try
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+            }
+        }
+        catch
+        {
+            // Best effort; the caller reports the cancellation either way.
+        }
     }
 }

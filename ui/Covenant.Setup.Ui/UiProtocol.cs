@@ -26,10 +26,29 @@ internal enum PromptDialogResult
     Close
 }
 
+internal static class UiJson
+{
+    /// <summary>
+    /// Protocol-wide serializer settings: tolerant property casing on reads,
+    /// omitted nulls on writes. Shared so every pipe participant agrees.
+    /// </summary>
+    public static readonly JsonSerializerOptions Options = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+    };
+
+    public static readonly JsonSerializerOptions Indented = new()
+    {
+        WriteIndented = true
+    };
+}
+
 internal static class UiTrace
 {
     private static readonly object Lock = new();
     private static readonly string? TracePath = CreateTracePath();
+    private static readonly string ProcessName = GetProcessName();
 
     public static void Write(string phase, object? detail = null)
     {
@@ -44,7 +63,7 @@ internal static class UiTrace
             {
                 time = DateTimeOffset.UtcNow.ToString("o"),
                 pid = Environment.ProcessId,
-                process = Process.GetCurrentProcess().ProcessName,
+                process = ProcessName,
                 phase,
                 detail
             }) + Environment.NewLine;
@@ -55,6 +74,19 @@ internal static class UiTrace
         }
         catch
         {
+        }
+    }
+
+    private static string GetProcessName()
+    {
+        try
+        {
+            using var process = Process.GetCurrentProcess();
+            return process.ProcessName;
+        }
+        catch
+        {
+            return string.Empty;
         }
     }
 
@@ -115,6 +147,15 @@ internal sealed class UiMessage
 
     [JsonPropertyName("icon")]
     public string? Icon { get; set; }
+
+    [JsonPropertyName("install_dir")]
+    public string? InstallDir { get; set; }
+
+    [JsonPropertyName("branding_image")]
+    public string? BrandingImage { get; set; }
+
+    [JsonPropertyName("automation")]
+    public bool? Automation { get; set; }
 }
 
 internal sealed class UiResponse

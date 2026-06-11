@@ -1,38 +1,47 @@
-using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using Microsoft.UI;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
+using Windows.ApplicationModel.DataTransfer;
 using Windows.Graphics;
+using Windows.UI;
 using WinRT.Interop;
 
 namespace Covenant.Setup.Ui;
 
-internal sealed class InstallerUiWindow : Window
+internal sealed class InstallerUiWindow : Window, IInstallerView
 {
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        PropertyNameCaseInsensitive = true,
-        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
-    };
-
     private readonly string _pipeName;
     private readonly TextBlock _statusText;
     private readonly ProgressBar _progressBar;
     private readonly TextBox _logBox;
+    private readonly Button _copyErrorButton;
     private readonly Button _saveErrataButton;
-    private readonly Button _closeButton;
+    private readonly Button _cancelButton;
     private readonly StringBuilder _logText = new();
-    private readonly object _writerLock = new();
-    private StreamWriter? _writer;
     private bool _canClose;
     private bool _closeRequested;
     private string? _errataJson;
+    private string? _failureMessage;
+    private string? _errorDetails;
+    private InstallerSessionController? _sessionController;
+    private int _currentStep;
+    private volatile bool _cancelRequested;
+
+    // Assigned by BuildContent/BuildWelcomePanel before the constructor returns.
+    private TextBlock _welcomeHeaderTitle = null!;
+    private TextBlock _welcomeInfoText = null!;
+    private TextBlock _welcomePathText = null!;
+    private Image _brandingImage = null!;
+    private FrameworkElement _brandingPlaceholder = null!;
+    private TextBlock _welcomeTitle = null!;
+    private Grid _welcomePanel = null!;
+    private Grid _progressPanel = null!;
+    private TaskCompletionSource<string>? _welcomeTcs;
 
     public InstallerUiWindow(string pipeName)
     {
@@ -64,6 +73,15 @@ internal sealed class InstallerUiWindow : Window
         ScrollViewer.SetVerticalScrollBarVisibility(_logBox, ScrollBarVisibility.Auto);
         ScrollViewer.SetHorizontalScrollBarVisibility(_logBox, ScrollBarVisibility.Auto);
 
+        _copyErrorButton = new Button
+        {
+            Content = "Copy",
+            IsEnabled = false,
+            MinWidth = 88,
+            Visibility = Visibility.Collapsed
+        };
+        _copyErrorButton.Click += (_, _) => CopyErrorToClipboard();
+
         _saveErrataButton = new Button
         {
             Content = "Save error data to local errata.json file?",
@@ -73,16 +91,25 @@ internal sealed class InstallerUiWindow : Window
         };
         _saveErrataButton.Click += async (_, _) => await SaveErrataAsync();
 
-        _closeButton = new Button
+        _cancelButton = new Button
         {
-            Content = "Close",
-            IsEnabled = false,
+            Content = "Cancel",
+            IsEnabled = true,
             MinWidth = 88
         };
-        _closeButton.Click += (_, _) =>
+        _cancelButton.Click += (_, _) =>
         {
-            _closeRequested = true;
-            Close();
+            // _canClose tracks which face the button shows: false = "Cancel"
+            // during the run, true = "Close" after the terminal message.
+            if (_canClose)
+            {
+                _closeRequested = true;
+                Close();
+            }
+            else
+            {
+                RequestCancel();
+            }
         };
 
         Content = BuildContent();
@@ -91,29 +118,34 @@ internal sealed class InstallerUiWindow : Window
 
     public void StartPipeLoop()
     {
-        _ = Task.Run(RunPipeLoop);
+        _sessionController = new InstallerSessionController(_pipeName, this);
+        _ = Task.Run(_sessionController.Run);
     }
 
     private Grid BuildContent()
     {
-        var root = new Grid
+        var root = new Grid();
+
+        // 1. Progress Panel
+        _progressPanel = new Grid
         {
             Padding = new Thickness(12),
-            RowSpacing = 12
+            RowSpacing = 12,
+            Visibility = Visibility.Collapsed
         };
-        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        _progressPanel.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        _progressPanel.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        _progressPanel.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        _progressPanel.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 
         Grid.SetRow(_statusText, 0);
-        root.Children.Add(_statusText);
+        _progressPanel.Children.Add(_statusText);
 
         Grid.SetRow(_progressBar, 1);
-        root.Children.Add(_progressBar);
+        _progressPanel.Children.Add(_progressBar);
 
         Grid.SetRow(_logBox, 2);
-        root.Children.Add(_logBox);
+        _progressPanel.Children.Add(_logBox);
 
         var buttonPanel = new StackPanel
         {
@@ -121,13 +153,197 @@ internal sealed class InstallerUiWindow : Window
             HorizontalAlignment = HorizontalAlignment.Right,
             Spacing = 8
         };
+        buttonPanel.Children.Add(_copyErrorButton);
         buttonPanel.Children.Add(_saveErrataButton);
-        buttonPanel.Children.Add(_closeButton);
+        buttonPanel.Children.Add(_cancelButton);
 
         Grid.SetRow(buttonPanel, 3);
-        root.Children.Add(buttonPanel);
+        _progressPanel.Children.Add(buttonPanel);
+
+        // 2. Welcome Panel
+        _welcomePanel = BuildWelcomePanel();
+        _welcomePanel.Visibility = Visibility.Collapsed; // Collapsed initially until ShowWelcomeAsync is called
+
+        root.Children.Add(_progressPanel);
+        root.Children.Add(_welcomePanel);
 
         return root;
+    }
+
+    private Grid BuildWelcomePanel()
+    {
+        var grid = new Grid
+        {
+            Padding = new Thickness(16),
+            ColumnSpacing = 16
+        };
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(260) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+        // Left Column: Branding Image Frame
+        _brandingImage = new Image
+        {
+            Stretch = Stretch.UniformToFill,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment = VerticalAlignment.Stretch,
+            Visibility = Visibility.Collapsed
+        };
+
+        // Fallback Gradient Placeholder
+        var placeholderBorder = new Border
+        {
+            CornerRadius = new CornerRadius(8),
+            Background = new LinearGradientBrush
+            {
+                StartPoint = new Windows.Foundation.Point(0, 0),
+                EndPoint = new Windows.Foundation.Point(1, 1),
+                GradientStops =
+                {
+                    new GradientStop { Color = Color.FromArgb(255, 99, 102, 241), Offset = 0 }, // Indigo
+                    new GradientStop { Color = Color.FromArgb(255, 168, 85, 247), Offset = 0.5 }, // Purple
+                    new GradientStop { Color = Color.FromArgb(255, 236, 72, 153), Offset = 1 } // Pink
+                }
+            }
+        };
+
+        var placeholderContent = new StackPanel
+        {
+            VerticalAlignment = VerticalAlignment.Center,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            Spacing = 16
+        };
+
+        placeholderContent.Children.Add(new FontIcon
+        {
+            FontFamily = new FontFamily("Segoe MDL2 Assets"),
+            FontSize = 56,
+            Glyph = "\uE7B8", // Package/Box icon
+            Foreground = new SolidColorBrush(Colors.White)
+        });
+
+        _welcomeTitle = new TextBlock
+        {
+            FontSize = 20,
+            FontWeight = Microsoft.UI.Text.FontWeights.Bold,
+            Foreground = new SolidColorBrush(Colors.White),
+            TextAlignment = TextAlignment.Center,
+            TextWrapping = TextWrapping.Wrap,
+            MaxWidth = 220
+        };
+        placeholderContent.Children.Add(_welcomeTitle);
+        placeholderBorder.Child = placeholderContent;
+        _brandingPlaceholder = placeholderBorder;
+
+        var brandingBorder = new Border
+        {
+            CornerRadius = new CornerRadius(8),
+            Background = new SolidColorBrush(Color.FromArgb(15, 128, 128, 128)),
+            BorderThickness = new Thickness(1),
+            BorderBrush = new SolidColorBrush(Color.FromArgb(30, 128, 128, 128)),
+            Child = new Grid
+            {
+                Children = { _brandingPlaceholder, _brandingImage }
+            }
+        };
+        Grid.SetColumn(brandingBorder, 0);
+        grid.Children.Add(brandingBorder);
+
+        // Right Column: Information Panel
+        var rightCol = new Grid
+        {
+            RowSpacing = 16
+        };
+        rightCol.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        rightCol.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        rightCol.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+        // Row 0: Title and Subtitle
+        var titlePanel = new StackPanel { Spacing = 4 };
+        _welcomeHeaderTitle = new TextBlock
+        {
+            Text = "App Installer",
+            FontSize = 24,
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+            TextWrapping = TextWrapping.Wrap
+        };
+
+        var subtitleText = new TextBlock
+        {
+            Text = "powered by Covenant Setup",
+            FontSize = 12,
+            Foreground = new SolidColorBrush(Color.FromArgb(180, 128, 128, 128)),
+            FontStyle = Windows.UI.Text.FontStyle.Italic
+        };
+        titlePanel.Children.Add(_welcomeHeaderTitle);
+        titlePanel.Children.Add(subtitleText);
+        Grid.SetRow(titlePanel, 0);
+        rightCol.Children.Add(titlePanel);
+
+        // Row 1: Info and Path box
+        var infoPanel = new StackPanel { Spacing = 8, VerticalAlignment = VerticalAlignment.Center };
+        _welcomeInfoText = new TextBlock
+        {
+            Text = "This installer will install the application to the folder specified below:",
+            TextWrapping = TextWrapping.Wrap,
+            FontSize = 14
+        };
+
+        var pathBorder = new Border
+        {
+            Background = new SolidColorBrush(Color.FromArgb(15, 128, 128, 128)),
+            BorderBrush = new SolidColorBrush(Color.FromArgb(30, 128, 128, 128)),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(6),
+            Padding = new Thickness(12),
+            Margin = new Thickness(0, 4, 0, 0)
+        };
+
+        _welcomePathText = new TextBlock
+        {
+            FontFamily = new FontFamily("Consolas"),
+            FontSize = 13,
+            TextWrapping = TextWrapping.Wrap,
+            IsTextSelectionEnabled = true
+        };
+        pathBorder.Child = _welcomePathText;
+
+        infoPanel.Children.Add(_welcomeInfoText);
+        infoPanel.Children.Add(pathBorder);
+        Grid.SetRow(infoPanel, 1);
+        rightCol.Children.Add(infoPanel);
+
+        // Row 2: Buttons
+        var welcomeButtons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Spacing = 8
+        };
+
+        var welcomeCancelBtn = new Button
+        {
+            Content = "Cancel",
+            MinWidth = 88
+        };
+        welcomeCancelBtn.Click += (_, _) => OnWelcomeCancelClicked();
+
+        var welcomeInstallBtn = new Button
+        {
+            Content = "Install",
+            MinWidth = 88,
+            Style = (Style)Microsoft.UI.Xaml.Application.Current.Resources["AccentButtonStyle"]
+        };
+        welcomeInstallBtn.Click += (_, _) => OnWelcomeInstallClicked();
+
+        welcomeButtons.Children.Add(welcomeCancelBtn);
+        welcomeButtons.Children.Add(welcomeInstallBtn);
+        Grid.SetRow(welcomeButtons, 2);
+        rightCol.Children.Add(welcomeButtons);
+
+        Grid.SetColumn(rightCol, 1);
+        grid.Children.Add(rightCol);
+
+        return grid;
     }
 
     private void ConfigureWindow()
@@ -138,9 +354,20 @@ internal sealed class InstallerUiWindow : Window
         appWindow.Title = Title;
         appWindow.Closing += (_, args) =>
         {
+            if (_welcomeTcs != null && !_welcomeTcs.Task.IsCompleted)
+            {
+                _welcomeTcs.TrySetResult("cancel");
+                _closeRequested = true;
+                return;
+            }
+
             if (!_canClose && !_closeRequested)
             {
+                // Keep the window open through the rollback; SetCanClose(true)
+                // on the terminal message makes X work again. RequestCancel
+                // guards itself against firing twice.
                 args.Cancel = true;
+                RequestCancel();
             }
         };
 
@@ -153,165 +380,272 @@ internal sealed class InstallerUiWindow : Window
         appWindow.MoveAndResize(new RectInt32(x, y, width, height));
     }
 
-    private void RunPipeLoop()
+    public Task<string> ShowWelcomeAsync(string appName, string installDir, string? brandingImage)
+    {
+        _welcomeTcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        BeginInvokeSafe(() =>
+        {
+            _welcomePanel.Visibility = Visibility.Visible;
+            _progressPanel.Visibility = Visibility.Collapsed;
+
+            _welcomeHeaderTitle.Text = $"{appName} Installer";
+            _welcomeInfoText.Text = $"This installer will install {appName} to:";
+            _welcomePathText.Text = installDir;
+            _welcomeTitle.Text = appName;
+
+            if (!string.IsNullOrEmpty(brandingImage) && File.Exists(brandingImage))
+            {
+                try
+                {
+                    _brandingImage.Source = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri(brandingImage));
+                    _brandingImage.Visibility = Visibility.Visible;
+                    _brandingPlaceholder.Visibility = Visibility.Collapsed;
+                }
+                catch
+                {
+                    _brandingImage.Visibility = Visibility.Collapsed;
+                    _brandingPlaceholder.Visibility = Visibility.Visible;
+                }
+            }
+            else
+            {
+                _brandingImage.Visibility = Visibility.Collapsed;
+                _brandingPlaceholder.Visibility = Visibility.Visible;
+            }
+        });
+
+        return _welcomeTcs.Task;
+    }
+
+    private void OnWelcomeInstallClicked()
+    {
+        _welcomeTcs?.TrySetResult("install");
+        BeginInvokeSafe(() =>
+        {
+            _welcomePanel.Visibility = Visibility.Collapsed;
+            _progressPanel.Visibility = Visibility.Visible;
+        });
+    }
+
+    private void OnWelcomeCancelClicked()
+    {
+        _welcomeTcs?.TrySetResult("cancel");
+        _closeRequested = true;
+        Close();
+    }
+
+    public void ShowInit(string title, string message)
+    {
+        BeginInvokeSafe(() =>
+        {
+            Title = title;
+            _statusText.Text = message;
+            _progressBar.Value = 0;
+            _cancelButton.Content = "Cancel";
+            _cancelButton.IsEnabled = true;
+
+            _welcomePanel.Visibility = Visibility.Collapsed;
+            _progressPanel.Visibility = Visibility.Visible;
+        });
+    }
+
+    public void ShowProgress(int percent, string? message, int currentStep = 0)
+    {
+        BeginInvokeSafe(() =>
+        {
+            _currentStep = currentStep;
+            if (!string.IsNullOrWhiteSpace(message))
+            {
+                _statusText.Text = message;
+            }
+            _progressBar.Value = percent;
+        });
+    }
+
+    public void AppendLog(string message)
+    {
+        BeginInvokeSafe(() =>
+        {
+            if (string.IsNullOrWhiteSpace(message))
+            {
+                return;
+            }
+
+            if (_logText.Length > 0)
+            {
+                _logText.AppendLine();
+            }
+            _logText.Append(message);
+            _logBox.Text = _logText.ToString();
+            _logBox.SelectionStart = _logBox.Text.Length;
+        });
+    }
+
+    public void ShowFinished(string message)
+    {
+        BeginInvokeSafe(() =>
+        {
+            // The window stays open showing the result; the user dismisses it
+            // with the Close button (the engine waits for the process to exit).
+            _statusText.Text = message;
+            _progressBar.Value = 100;
+            _cancelButton.Content = "Close";
+            SetCanClose(true);
+        });
+    }
+
+    public void ShowFailure(string failureMessage, string? errorDetails, string errataJson)
+    {
+        BeginInvokeSafe(() =>
+        {
+            var supportContact = ParseSupportContact(errataJson);
+            _statusText.Text = FormatFailureMessage(failureMessage, supportContact);
+            _progressBar.Value = 100;
+            AppendLog(failureMessage);
+            if (!string.IsNullOrWhiteSpace(errorDetails))
+            {
+                AppendLog("Error details: " + errorDetails);
+            }
+            if (!string.IsNullOrEmpty(supportContact))
+            {
+                AppendLog($"Support contact: {supportContact}");
+            }
+
+            _errataJson = errataJson;
+            _failureMessage = failureMessage;
+            _errorDetails = errorDetails;
+            _saveErrataButton.IsEnabled = !string.IsNullOrWhiteSpace(_errataJson);
+            _saveErrataButton.Visibility = Visibility.Visible;
+            _copyErrorButton.IsEnabled = true;
+            _copyErrorButton.Visibility = Visibility.Visible;
+            _cancelButton.Content = "Close";
+            SetCanClose(true);
+        });
+    }
+
+    public Task<string> ShowPromptAsync(UiMessage message)
+    {
+        var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (_cancelRequested)
+        {
+            tcs.SetResult("none");
+            return tcs.Task;
+        }
+        if (!DispatcherQueue.TryEnqueue(async () =>
+        {
+            try
+            {
+                if (_cancelRequested)
+                {
+                    tcs.SetResult("none");
+                    return;
+                }
+                var buttons = MapButtons(message.Buttons);
+                var dialog = new ContentDialog
+                {
+                    Title = message.Title ?? "covenant-setup",
+                    Content = BuildDialogContent(message.Message ?? string.Empty, MapIcon(message.Icon))
+                };
+                ConfigureDialogButtons(dialog, buttons);
+
+                if (Content is FrameworkElement root)
+                {
+                    dialog.XamlRoot = root.XamlRoot;
+                }
+
+                var result = ToPromptDialogResult(await dialog.ShowAsync());
+                UiTrace.Write("prompt_closed", new { message.Id, Result = result.ToString() });
+                tcs.SetResult(MapDialogResult(result, buttons));
+            }
+            catch (Exception ex)
+            {
+                tcs.SetException(ex);
+            }
+        }))
+        {
+            tcs.SetResult("none");
+        }
+        return tcs.Task;
+    }
+
+    public void CloseView()
+    {
+        BeginInvokeSafe(() =>
+        {
+            _closeRequested = true;
+            Close();
+        });
+    }
+
+    public void ShowPipeError(string message)
+    {
+        BeginInvokeSafe(() =>
+        {
+            AppendLog("UI pipe error: " + message);
+            _cancelButton.Content = "Close";
+            SetCanClose(true);
+        });
+    }
+
+    private void RequestCancel()
+    {
+        if (_cancelRequested)
+        {
+            return;
+        }
+        _cancelRequested = true;
+
+        // Disable (don't hide) so the button cannot double-fire; the terminal
+        // finish/fail message re-enables it as "Close" via SetCanClose(true).
+        _cancelButton.IsEnabled = false;
+        _statusText.Text = "Cancelling - reverting changes...";
+        UiTrace.Write("cancel_requested", new { _currentStep });
+
+        // The pipe stays open: the engine rolls back over the same session and
+        // sends rollback progress followed by the terminal message.
+        _sessionController?.RequestCancel();
+    }
+
+    internal static string BuildCopyText(string? failureMessage, string? errorDetails, string? errataJson)
+    {
+        var builder = new StringBuilder();
+        if (!string.IsNullOrWhiteSpace(failureMessage))
+        {
+            builder.AppendLine(failureMessage);
+        }
+        if (!string.IsNullOrWhiteSpace(errorDetails))
+        {
+            builder.AppendLine("Error details: " + errorDetails);
+        }
+        if (!string.IsNullOrWhiteSpace(errataJson))
+        {
+            builder.AppendLine("Errata:");
+            builder.AppendLine(errataJson);
+        }
+        return builder.ToString().TrimEnd();
+    }
+
+    private void CopyErrorToClipboard()
     {
         try
         {
-            UiTrace.Write("pipe_server_create", new { PipeName = _pipeName });
-            using var pipe = new NamedPipeServerStream(
-                _pipeName,
-                PipeDirection.InOut,
-                1,
-                PipeTransmissionMode.Byte,
-                PipeOptions.None);
-            UiTrace.Write("pipe_wait_for_connection", new { PipeName = _pipeName });
-            pipe.WaitForConnection();
-            UiTrace.Write("pipe_connected", new { PipeName = _pipeName });
-
-            using var reader = new StreamReader(pipe, new UTF8Encoding(false), detectEncodingFromByteOrderMarks: false, bufferSize: 4096, leaveOpen: true);
-            using var writer = new StreamWriter(pipe, new UTF8Encoding(false), bufferSize: 4096, leaveOpen: true)
+            var text = BuildCopyText(_failureMessage, _errorDetails, _errataJson);
+            if (string.IsNullOrEmpty(text))
             {
-                AutoFlush = true,
-                NewLine = "\n"
-            };
-
-            lock (_writerLock)
-            {
-                _writer = writer;
+                return;
             }
 
-            string? line;
-            while ((line = reader.ReadLine()) is not null)
-            {
-                UiTrace.Write("pipe_receive", SafeMessageSummary(line));
-                if (!HandleMessage(line))
-                {
-                    break;
-                }
-            }
+            var package = new DataPackage();
+            package.SetText(text);
+            Clipboard.SetContent(package);
+            AppendLog("Copied error details to clipboard");
         }
         catch (Exception ex)
         {
-            UiTrace.Write("pipe_error", new { ex.Message, ex.GetType().FullName, ex.StackTrace });
-            BeginInvokeSafe(() =>
-            {
-                AppendLog("UI pipe error: " + ex.Message);
-                SetCanClose(true);
-            });
+            UiTrace.Write("copy_error_failed", new { ex.Message, ex.GetType().FullName });
+            AppendLog("Unable to copy error details: " + ex.Message);
         }
-        finally
-        {
-            lock (_writerLock)
-            {
-                _writer = null;
-            }
-            UiTrace.Write("pipe_loop_exit");
-        }
-    }
-
-    private bool HandleMessage(string line)
-    {
-        var message = JsonSerializer.Deserialize<UiMessage>(line, JsonOptions);
-        if (message?.Type is null)
-        {
-            return true;
-        }
-
-        switch (message.Type)
-        {
-            case "init":
-                BeginInvokeSafe(() =>
-                {
-                    Title = message.Title ?? "covenant-setup";
-                    _statusText.Text = message.Message ?? Title;
-                    _progressBar.Value = 0;
-                });
-                return true;
-
-            case "progress":
-                BeginInvokeSafe(() => ApplyProgress(message));
-                return true;
-
-            case "log":
-                BeginInvokeSafe(() => AppendLog(message.Message ?? string.Empty));
-                return true;
-
-            case "finish":
-                UiTrace.Write("finish_message", new { message.Message });
-                BeginInvokeSafe(() =>
-                {
-                    _statusText.Text = message.Message ?? "Complete";
-                    _progressBar.Value = 100;
-                    SetCanClose(true);
-                    _closeRequested = true;
-                    Close();
-                });
-                return true;
-
-            case "fail":
-                UiTrace.Write("fail_message", new { message.AppName, message.Operation, message.Message, message.Error });
-                BeginInvokeSafe(() => ApplyFailure(message));
-                return true;
-
-            case "prompt":
-                UiTrace.Write("prompt_show_requested", new { message.Id, message.Title, message.Buttons, message.Icon });
-                var result = ShowPrompt(message);
-                UiTrace.Write("prompt_response", new { message.Id, Result = result });
-                WriteResponse(new UiResponse
-                {
-                    Type = "prompt_response",
-                    Id = message.Id,
-                    Result = result
-                });
-                return true;
-
-            case "close":
-                UiTrace.Write("close_message");
-                BeginInvokeSafe(() =>
-                {
-                    _closeRequested = true;
-                    Close();
-                });
-                return false;
-
-            default:
-                return true;
-        }
-    }
-
-    private void ApplyProgress(UiMessage message)
-    {
-        if (!string.IsNullOrWhiteSpace(message.Message))
-        {
-            _statusText.Text = message.Message;
-            AppendLog(message.Message);
-        }
-
-        var total = Math.Max(1, message.TotalSteps ?? 1);
-        var current = Math.Max(0, Math.Min(total, message.CurrentStep ?? 0));
-        _progressBar.Value = Math.Max(0, Math.Min(100, current * 100 / total));
-    }
-
-    private void ApplyFailure(UiMessage message)
-    {
-        var operation = string.IsNullOrWhiteSpace(message.Operation) ? "complete" : message.Operation;
-        var appName = string.IsNullOrWhiteSpace(message.AppName) ? "unknown" : message.AppName;
-        var failureMessage = string.IsNullOrWhiteSpace(message.Message)
-            ? $"Error: program {appName} failed to {operation} completely!"
-            : message.Message;
-
-        _statusText.Text = failureMessage;
-        _progressBar.Value = 100;
-        AppendLog(failureMessage);
-        if (!string.IsNullOrWhiteSpace(message.Error))
-        {
-            AppendLog("Error details: " + message.Error);
-        }
-
-        _errataJson = BuildErrataJson(message);
-        _saveErrataButton.IsEnabled = !string.IsNullOrWhiteSpace(_errataJson);
-        _saveErrataButton.Visibility = Visibility.Visible;
-        SetCanClose(true);
     }
 
     private async Task SaveErrataAsync()
@@ -341,64 +675,6 @@ internal sealed class InstallerUiWindow : Window
             UiTrace.Write("errata_save_error", new { ex.Message, ex.GetType().FullName, ex.StackTrace });
             await ShowNoticeAsync("Unable to save errata.json: " + ex.Message, PromptIconKind.Error);
         }
-    }
-
-    internal static string BuildErrataJson(UiMessage message)
-    {
-        if (message.Errata is JsonElement errata &&
-            errata.ValueKind is not JsonValueKind.Undefined and not JsonValueKind.Null)
-        {
-            return JsonSerializer.Serialize(errata, new JsonSerializerOptions { WriteIndented = true });
-        }
-
-        return JsonSerializer.Serialize(new
-        {
-            app_name = message.AppName,
-            operation = message.Operation,
-            message = message.Message,
-            error = message.Error
-        }, new JsonSerializerOptions { WriteIndented = true });
-    }
-
-    private string ShowPrompt(UiMessage message)
-    {
-        var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-        if (!DispatcherQueue.TryEnqueue(async () =>
-        {
-            try
-            {
-                tcs.SetResult(await ShowPromptAsync(message));
-            }
-            catch (Exception ex)
-            {
-                tcs.SetException(ex);
-            }
-        }))
-        {
-            return "none";
-        }
-
-        return tcs.Task.GetAwaiter().GetResult();
-    }
-
-    private async Task<string> ShowPromptAsync(UiMessage message)
-    {
-        var buttons = MapButtons(message.Buttons);
-        var dialog = new ContentDialog
-        {
-            Title = message.Title ?? "covenant-setup",
-            Content = BuildDialogContent(message.Message ?? string.Empty, MapIcon(message.Icon))
-        };
-        ConfigureDialogButtons(dialog, buttons);
-
-        if (Content is FrameworkElement root)
-        {
-            dialog.XamlRoot = root.XamlRoot;
-        }
-
-        var result = ToPromptDialogResult(await dialog.ShowAsync());
-        UiTrace.Write("prompt_closed", new { message.Id, Result = result.ToString() });
-        return MapDialogResult(result, buttons);
     }
 
     private async Task ShowNoticeAsync(string message, PromptIconKind icon)
@@ -465,6 +741,29 @@ internal sealed class InstallerUiWindow : Window
         _ => PromptIconKind.Information
     };
 
+    internal static string? ParseSupportContact(string errataJson)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(errataJson);
+            if (doc.RootElement.ValueKind == JsonValueKind.Object &&
+                doc.RootElement.TryGetProperty("support_contact", out var contactProp) &&
+                contactProp.ValueKind == JsonValueKind.String)
+            {
+                return contactProp.GetString();
+            }
+        }
+        catch (JsonException)
+        {
+        }
+        return null;
+    }
+
+    internal static string FormatFailureMessage(string failureMessage, string? supportContact) =>
+        string.IsNullOrEmpty(supportContact)
+            ? failureMessage
+            : $"{failureMessage}\n\nFor support, please contact: {supportContact}";
+
     internal static string MapDialogResult(PromptDialogResult result, PromptButtonSet buttons) => result switch
     {
         PromptDialogResult.Primary when buttons == PromptButtonSet.YesNo => "yes",
@@ -504,15 +803,6 @@ internal sealed class InstallerUiWindow : Window
         }
     }
 
-    private void WriteResponse(UiResponse response)
-    {
-        lock (_writerLock)
-        {
-            _writer?.WriteLine(JsonSerializer.Serialize(response, JsonOptions));
-            UiTrace.Write("pipe_send", new { response.Type, response.Id, response.Result });
-        }
-    }
-
     private void BeginInvokeSafe(Action action)
     {
         try
@@ -543,41 +833,6 @@ internal sealed class InstallerUiWindow : Window
     private void SetCanClose(bool canClose)
     {
         _canClose = canClose;
-        _closeButton.IsEnabled = canClose;
-    }
-
-    private void AppendLog(string line)
-    {
-        if (string.IsNullOrWhiteSpace(line))
-        {
-            return;
-        }
-
-        if (_logText.Length > 0)
-        {
-            _logText.AppendLine();
-        }
-        _logText.Append(line);
-        _logBox.Text = _logText.ToString();
-        _logBox.SelectionStart = _logBox.Text.Length;
-    }
-
-    internal static object SafeMessageSummary(string line)
-    {
-        try
-        {
-            using var document = JsonDocument.Parse(line);
-            var root = document.RootElement;
-            return new
-            {
-                Type = root.TryGetProperty("type", out var type) ? type.GetString() : null,
-                Id = root.TryGetProperty("id", out var id) ? id.GetString() : null,
-                Message = root.TryGetProperty("message", out var message) ? message.GetString() : null
-            };
-        }
-        catch
-        {
-            return new { RawLength = line.Length };
-        }
+        _cancelButton.IsEnabled = canClose;
     }
 }

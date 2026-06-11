@@ -19,7 +19,7 @@ public class InstallerUiWindowHelperTests
             Errata = doc.RootElement.Clone()
         };
 
-        var json = InstallerUiWindow.BuildErrataJson(msg);
+        var json = InstallerSessionController.BuildErrataJson(msg);
 
         using var parsed = JsonDocument.Parse(json);
         Assert.Equal(JsonValueKind.Object, parsed.RootElement.ValueKind);
@@ -40,7 +40,7 @@ public class InstallerUiWindowHelperTests
             Errata = null
         };
 
-        var json = InstallerUiWindow.BuildErrataJson(msg);
+        var json = InstallerSessionController.BuildErrataJson(msg);
 
         using var parsed = JsonDocument.Parse(json);
         Assert.Equal("MyApp", parsed.RootElement.GetProperty("app_name").GetString());
@@ -60,7 +60,7 @@ public class InstallerUiWindowHelperTests
             Errata = doc.RootElement.Clone()
         };
 
-        var json = InstallerUiWindow.BuildErrataJson(msg);
+        var json = InstallerSessionController.BuildErrataJson(msg);
 
         using var parsed = JsonDocument.Parse(json);
         Assert.Equal("MyApp", parsed.RootElement.GetProperty("app_name").GetString());
@@ -72,7 +72,7 @@ public class InstallerUiWindowHelperTests
     {
         const string line = """{"type":"progress","id":"x1","message":"Step 1","extra":"ignored"}""";
 
-        var summary = InstallerUiWindow.SafeMessageSummary(line);
+        var summary = InstallerSessionController.SafeMessageSummary(line);
         var json = JsonSerializer.Serialize(summary);
 
         using var parsed = JsonDocument.Parse(json);
@@ -84,7 +84,7 @@ public class InstallerUiWindowHelperTests
     [Fact]
     public void SafeMessageSummary_returns_raw_length_for_invalid_json()
     {
-        var summary = InstallerUiWindow.SafeMessageSummary("not-json-at-all");
+        var summary = InstallerSessionController.SafeMessageSummary("not-json-at-all");
         var json = JsonSerializer.Serialize(summary);
 
         using var parsed = JsonDocument.Parse(json);
@@ -95,13 +95,45 @@ public class InstallerUiWindowHelperTests
     [Fact]
     public void SafeMessageSummary_returns_null_fields_when_known_keys_absent()
     {
-        var summary = InstallerUiWindow.SafeMessageSummary("{}");
+        var summary = InstallerSessionController.SafeMessageSummary("{}");
         var json = JsonSerializer.Serialize(summary);
 
         using var parsed = JsonDocument.Parse(json);
         Assert.Equal(JsonValueKind.Null, parsed.RootElement.GetProperty("Type").ValueKind);
         Assert.Equal(JsonValueKind.Null, parsed.RootElement.GetProperty("Id").ValueKind);
         Assert.Equal(JsonValueKind.Null, parsed.RootElement.GetProperty("Message").ValueKind);
+    }
+
+    [Fact]
+    public void BuildCopyText_combines_message_details_and_errata()
+    {
+        var text = InstallerUiWindow.BuildCopyText(
+            "Error: program MyApp failed to install completely!",
+            "Registry write access denied",
+            """{"schema":"covenant_setup_errata_v1"}""");
+
+        var expected =
+            "Error: program MyApp failed to install completely!" + Environment.NewLine +
+            "Error details: Registry write access denied" + Environment.NewLine +
+            "Errata:" + Environment.NewLine +
+            """{"schema":"covenant_setup_errata_v1"}""";
+        Assert.Equal(expected, text);
+    }
+
+    [Fact]
+    public void BuildCopyText_skips_missing_details_and_errata()
+    {
+        Assert.Equal("Failed", InstallerUiWindow.BuildCopyText("Failed", null, null));
+        Assert.Equal("Failed", InstallerUiWindow.BuildCopyText("Failed", "  ", ""));
+        Assert.Equal(
+            "Failed" + Environment.NewLine + "Error details: E_FAIL",
+            InstallerUiWindow.BuildCopyText("Failed", "E_FAIL", null));
+    }
+
+    [Fact]
+    public void BuildCopyText_returns_empty_when_nothing_to_copy()
+    {
+        Assert.Equal(string.Empty, InstallerUiWindow.BuildCopyText(null, null, null));
     }
 
     [Theory]

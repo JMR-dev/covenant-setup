@@ -1,0 +1,20 @@
+# install-cancel-rollback: user clicks Cancel mid-install, engine rolls back in the same window
+# The scenario blocks at await_response until the Cancel button is clicked.
+{"type":"init","title":"Installing SampleApp","message":"Preparing...","total_steps":8,"app_name":"SampleApp","install_dir":"C:\\Program Files\\SampleApp"}
+{"await_response":{"id":"welcome","expect":"install"}}
+{"wait_ms": 400}
+{"type":"progress","current_step":1,"total_steps":8,"message":"Creating directories"}
+{"wait_ms": 400}
+{"type":"progress","current_step":2,"total_steps":8,"message":"Copying files"}
+{"wait_ms": 400}
+{"type":"progress","current_step":3,"total_steps":8,"message":"Writing registry keys"}
+{"await_response":{"id":"cancel"}}
+{"type":"log","message":"Cancel requested - reverting changes..."}
+{"wait_ms": 400}
+{"type":"progress","current_step":1,"total_steps":3,"message":"Removing registry branch Software\\SampleApp"}
+{"wait_ms": 400}
+{"type":"progress","current_step":2,"total_steps":3,"message":"Removing file C:\\Program Files\\SampleApp\\app.exe"}
+{"wait_ms": 400}
+{"type":"progress","current_step":3,"total_steps":3,"message":"Removing directory C:\\Program Files\\SampleApp"}
+{"wait_ms": 400}
+{"type":"finish","message":"SampleApp installation cancelled. All changes were reverted."}

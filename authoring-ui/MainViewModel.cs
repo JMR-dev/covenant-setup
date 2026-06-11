@@ -279,7 +279,9 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
         };
     }
 
-    public ValidationResult Validate()
+    public ValidationResult Validate() => Validate(BuildDocument());
+
+    private ValidationResult Validate(ManifestDocument document)
     {
         var errors = new List<string>();
         var warnings = new List<string>();
@@ -292,8 +294,6 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
         {
             errors.Add("App name cannot contain characters that are invalid in Windows file names.");
         }
-
-        var document = BuildDocument();
 
         if (document.Directories.Count + document.Files.Count + document.Registry.Count + document.Shortcuts.Count + document.Scripts.Count == 0)
         {
@@ -342,8 +342,9 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
 
     private void RefreshPreview()
     {
-        TomlPreview = ManifestTomlWriter.Write(BuildDocument());
-        var validation = Validate();
+        var document = BuildDocument();
+        TomlPreview = ManifestTomlWriter.Write(document);
+        var validation = Validate(document);
         HasValidationErrors = !validation.IsValid;
         ValidationSummary = validation.Errors.Count switch
         {
