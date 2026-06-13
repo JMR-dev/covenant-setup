@@ -58,6 +58,7 @@ pub(crate) fn start_tui_progress(ui_mode: UiMode, label: String) -> Option<TuiPr
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn start_gui_progress(
     ui_mode: UiMode,
     sys: &dyn Sys,

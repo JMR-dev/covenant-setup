@@ -35,8 +35,12 @@ cargo run -- uninstall examples/journal.json --json
 
 Expected effects:
 
-- Creates `%LOCALAPPDATA%\CovenantSetupExample`
-- Copies `sample_app.cmd` into the `bin` directory
-- Writes `HKCU\Software\CovenantSetupExample\InstallRoot`
+- Creates `%LOCALAPPDATA%\CovenantSetupSample`
+- Copies `sample_app.cmd` into the `bin` directory and `post_install.ps1` into the install root
+- Writes `HKCU\Software\CovenantSetupSample\InstallRoot`
 - Creates a desktop shortcut
-- Runs an inline PowerShell post-install command and records only the script execution in the journal
+- Runs `post_install.ps1` from the install root, which writes a timestamped marker under `logs\`
+
+Every directory, file, registry value, shortcut, and script execution is recorded in the
+journal, so uninstall reverses all of them (and the `purge` spec removes the whole install
+root, including the `logs\` directory the script created).

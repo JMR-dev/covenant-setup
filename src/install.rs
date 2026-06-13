@@ -14,6 +14,7 @@ pub(crate) struct InstallRuntime {
     pub(crate) uninstall_registry_root: RegistryRoot,
     pub(crate) uninstall_registry_key: String,
 }
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn install(
     manifest_path: &Path,
     journal_path: Option<PathBuf>,
@@ -285,8 +286,8 @@ pub(crate) fn install(
         );
         let cancelled = matches!(err, AppError::Cancelled);
         let mut rollback_error_msg = None;
-        if let Some(runtime) = &runtime_opt {
-            if !journal.actions.is_empty() {
+        if let Some(runtime) = &runtime_opt
+            && !journal.actions.is_empty() {
                 let write_res = (|| -> Result<(), AppError> {
                     write_journal(&runtime.journal_path, &journal)?;
                     let read_back = fs::read_to_string(&runtime.journal_path)?;
@@ -328,7 +329,6 @@ pub(crate) fn install(
                     }
                 }
             }
-        }
 
         if cancelled && rollback_error_msg.is_none() {
             let _ = finish_gui_progress(

@@ -82,7 +82,7 @@ pub(crate) fn build_packaged_installer(
     manifest: &InstallManifest,
     logger: &Logger,
 ) -> Result<(), AppError> {
-    fs::copy(current_exe, &exe_target)?;
+    fs::copy(current_exe, exe_target)?;
     let bundled_manifest_name = expected_manifest_file_name(&manifest.app_name);
     let bundle = EmbeddedBundle {
         metadata: PackagedApp {
@@ -643,7 +643,7 @@ mod tests {
             temp.path(),
             &manifest,
             &bundled_manifest_name,
-            &[generated_installer.clone()],
+            std::slice::from_ref(&generated_installer),
         )
         .unwrap();
         files.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));

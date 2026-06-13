@@ -10,6 +10,10 @@ paths = [
 source = 'payload\sample_app.cmd'
 destination = '{LocalAppData}\CovenantSetupSample\bin\sample_app.cmd'
 
+[[files]]
+source = 'payload\post_install.ps1'
+destination = '{LocalAppData}\CovenantSetupSample\post_install.ps1'
+
 [[registry]]
 key = 'HKCU\Software\CovenantSetupSample'
 name = 'InstallRoot'
@@ -20,13 +24,17 @@ path = '{Desktop}\CovenantSetupSample.lnk'
 target = '{LocalAppData}\CovenantSetupSample\bin\sample_app.cmd'
 description = 'Launch the Covenant-Setup sample payload'
 
+# The post-install script is copied into the install root above, so it is
+# invoked by name with the working directory already pointing there. This keeps
+# the script locatable for both direct and packaged (temp-extracted) installs,
+# where the manifest's own directory is not the process working directory.
 [[scripts]]
 command = 'powershell'
 args = [
   '-ExecutionPolicy',
   'Bypass',
   '-File',
-  'payload\post_install.ps1'
+  'post_install.ps1'
 ]
 working_directory = '{LocalAppData}\CovenantSetupSample'
 

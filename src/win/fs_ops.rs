@@ -4,18 +4,18 @@ pub fn create_directory_recursive(path: &Path, logger: &Logger) -> Result<(), Ap
     if path.as_os_str().is_empty() || path.exists() {
         return Ok(());
     }
-    if let Some(parent) = path.parent() {
-        if parent != path {
-            create_directory_recursive(parent, logger)?;
-        }
+    if let Some(parent) = path.parent()
+        && parent != path
+    {
+        create_directory_recursive(parent, logger)?;
     }
     logger.unsafe_enter("CreateDirectoryW", json!({"path": path}));
     let result = unsafe { CreateDirectoryW(PCWSTR(Utf16Arg::from_path(path).as_ptr()), None) };
     logger.unsafe_exit("CreateDirectoryW", json!({"ok": result.is_ok()}));
-    if let Err(err) = result {
-        if !path.exists() {
-            return Err(err.into());
-        }
+    if let Err(err) = result
+        && !path.exists()
+    {
+        return Err(err.into());
     }
     Ok(())
 }

@@ -20,6 +20,7 @@ pub(crate) trait Sys: Send + Sync {
     fn prompt_reboot_tui(&self) -> Result<bool, AppError>;
 
     // (3) cleanup helper self-delete
+    #[allow(clippy::too_many_arguments)]
     fn spawn_cleanup_helper(
         &self,
         target_exe: &Path,

@@ -6,6 +6,7 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn uninstall(
     journal_path: &Path,
     elevate: bool,
@@ -267,10 +268,11 @@ pub(crate) fn cleanup(
         sys.remove_file_with_fallback(&target_exe, &effective_logger)?;
         reboot_required = target_exe.exists();
     }
-    if let Some(install_root) = install_root {
-        if install_root.exists() && fs::read_dir(&install_root)?.next().is_none() {
-            win::remove_directory_if_exists(&install_root, &effective_logger)?;
-        }
+    if let Some(install_root) = install_root
+        && install_root.exists()
+        && fs::read_dir(&install_root)?.next().is_none()
+    {
+        win::remove_directory_if_exists(&install_root, &effective_logger)?;
     }
     reboot_required |= sys.schedule_helper_self_cleanup(&effective_logger)?;
     if ui_mode == UiMode::Gui && !automation {
@@ -383,7 +385,10 @@ pub(crate) fn journal_requires_admin(
                     return Ok(true);
                 }
             }
-            JournalAction::WriteRegistry { root, .. } if matches!(root, RegistryRoot::Hklm) => {
+            JournalAction::WriteRegistry {
+                root: RegistryRoot::Hklm,
+                ..
+            } => {
                 return Ok(true);
             }
             _ => {}
