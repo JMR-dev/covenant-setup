@@ -21,3 +21,16 @@ Future integration should make the separate app feel first-class from the CLI wi
 - Keep the runtime progress helper embedded with installers, but do not embed the authoring UI in generated installer artifacts.
 - Keep installer generation in the authoring UI gated on detection of a real `covenant-setup.exe`, and call the Rust CLI for packaging rather than duplicating packager behavior in C#.
 - Add a Rust CLI validation command and have the authoring UI call it before packaging so the Rust manifest schema remains the source of truth.
+
+## Correctness
+
+Two notes worth flagging
+
+1. Pre-existing clippy warnings (not mine): The codebase carries 11 clippy warnings (too_many_arguments ×4, collapsible_if ×4, cloned_ref_to_slice_refs,
+   needless_borrow, redundant_guard). I verified against the committed HEAD in a throwaway worktree — all 11 predate this refactor. The one lint I did introduce
+   (let_and_return in the new run()) I fixed. So clippy is at exact parity with baseline. Cleaning up those 11 would mean logic edits, which your "pure move only"
+   constraint excludes — happy to do them as a separate pass if you want.
+2. Sample manifest script quirk (not mine): examples/Covenant-SetupSampleApp-install.toml runs post_install.ps1 via -File payload\post_install.ps1 (relative) with
+   working_directory = {LocalAppData}\..., so PowerShell can't find the script and the install fails → triggers rollback (exit 0xfffd0000). This is inherent to the
+   manifest + the verbatim-moved execute_script logic; the packaged-exe run fails identically, confirming behavior parity. My clean round-trip used a script-free
+   manifest to exercise the journal path. The example's -File path likely wants to be manifest-relative — let me know if you'd like that fixed.

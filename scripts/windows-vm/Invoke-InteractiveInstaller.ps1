@@ -154,22 +154,7 @@ try {
         $process = Start-Process -FilePath $dotnetPath -ArgumentList @("test", "$testProjectDir\Covenant.Setup.Ui.Tests.csproj", "--filter", "FullyQualifiedName=Covenant.Setup.Ui.Tests.InstallerUiAutomationTests.TestRealInstallUninstallFlow") -PassThru -NoNewWindow -Wait -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog
         
         Write-TraceEvent -Phase "dotnet_test_finished" -Detail @{ exitCode = $process.ExitCode }
-        
-        $result = [ordered]@{
-            success      = ($process.ExitCode -eq 0)
-            exitCode     = [int]$process.ExitCode
-            installerPath = $InstallerPath
-            installerArgs = $InstallerArguments
-            operationName = $OperationName
-            tracePath     = $TracePath
-            startedAt    = $startedAt.ToString("o")
-            finishedAt   = (Get-Date).ToString("o")
-        }
-        $result | ConvertTo-Json | Set-Content -LiteralPath $ResultPath -Encoding UTF8
-        
-        if ($process.ExitCode -ne 0) {
-            exit $process.ExitCode
-        }
+        $installerExitCode = [int]$process.ExitCode
     }
     else {
         $installer = Start-Process -FilePath $InstallerPath -ArgumentList $InstallerArguments -PassThru
@@ -202,22 +187,25 @@ try {
 
         Write-TraceEvent -Phase "installer_process_exited" -Detail @{ pid = $installer.Id; exitCode = $installer.ExitCode; operationName = $OperationName }
         Export-InstallerDiagnostics -Reason "installer_exit" -InstallerProcess $installer
+        $installerExitCode = [int]$installer.ExitCode
+    }
 
-        $result = [ordered]@{
-            success      = ($installer.ExitCode -eq 0)
-            exitCode     = [int]$installer.ExitCode
-            installerPath = $InstallerPath
-            installerArgs = $InstallerArguments
-            operationName = $OperationName
-            tracePath     = $TracePath
-            startedAt    = $startedAt.ToString("o")
-            finishedAt   = (Get-Date).ToString("o")
-        }
-        $result | ConvertTo-Json | Set-Content -LiteralPath $ResultPath -Encoding UTF8
+    # Both runners (dotnet test vs. windowed process) converge here so the
+    # result JSON and exit-code propagation live in one place.
+    $result = [ordered]@{
+        success      = ($installerExitCode -eq 0)
+        exitCode     = $installerExitCode
+        installerPath = $InstallerPath
+        installerArgs = $InstallerArguments
+        operationName = $OperationName
+        tracePath     = $TracePath
+        startedAt    = $startedAt.ToString("o")
+        finishedAt   = (Get-Date).ToString("o")
+    }
+    $result | ConvertTo-Json | Set-Content -LiteralPath $ResultPath -Encoding UTF8
 
-        if ($installer.ExitCode -ne 0) {
-            exit $installer.ExitCode
-        }
+    if ($installerExitCode -ne 0) {
+        exit $installerExitCode
     }
 }
 catch {
