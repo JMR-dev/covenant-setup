@@ -4,6 +4,7 @@ using Microsoft.UI;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Windows.ApplicationModel.DataTransfer;
@@ -36,6 +37,7 @@ internal sealed class InstallerUiWindow : Window, IInstallerView
     private TextBlock _welcomeHeaderTitle = null!;
     private TextBlock _welcomeInfoText = null!;
     private TextBlock _welcomePathText = null!;
+    private Border _welcomePathBorder = null!;
     private Image _brandingImage = null!;
     private FrameworkElement _brandingPlaceholder = null!;
     private TextBlock _welcomeTitle = null!;
@@ -61,6 +63,7 @@ internal sealed class InstallerUiWindow : Window, IInstallerView
             Maximum = 100,
             Height = 24
         };
+        AutomationProperties.SetAutomationId(_progressBar, "ProgressBar");
 
         _logBox = new TextBox
         {
@@ -70,6 +73,7 @@ internal sealed class InstallerUiWindow : Window, IInstallerView
             IsReadOnly = true,
             TextWrapping = TextWrapping.NoWrap
         };
+        AutomationProperties.SetAutomationId(_logBox, "LogBox");
         ScrollViewer.SetVerticalScrollBarVisibility(_logBox, ScrollBarVisibility.Auto);
         ScrollViewer.SetHorizontalScrollBarVisibility(_logBox, ScrollBarVisibility.Auto);
 
@@ -80,6 +84,7 @@ internal sealed class InstallerUiWindow : Window, IInstallerView
             MinWidth = 88,
             Visibility = Visibility.Collapsed
         };
+        AutomationProperties.SetAutomationId(_copyErrorButton, "CopyErrorButton");
         _copyErrorButton.Click += (_, _) => CopyErrorToClipboard();
 
         _saveErrataButton = new Button
@@ -89,6 +94,7 @@ internal sealed class InstallerUiWindow : Window, IInstallerView
             MinWidth = 320,
             Visibility = Visibility.Collapsed
         };
+        AutomationProperties.SetAutomationId(_saveErrataButton, "SaveErrataButton");
         _saveErrataButton.Click += async (_, _) => await SaveErrataAsync();
 
         _cancelButton = new Button
@@ -97,6 +103,7 @@ internal sealed class InstallerUiWindow : Window, IInstallerView
             IsEnabled = true,
             MinWidth = 88
         };
+        AutomationProperties.SetAutomationId(_cancelButton, "CancelButton");
         _cancelButton.Click += (_, _) =>
         {
             // _canClose tracks which face the button shows: false = "Cancel"
@@ -288,7 +295,7 @@ internal sealed class InstallerUiWindow : Window, IInstallerView
             FontSize = 14
         };
 
-        var pathBorder = new Border
+        _welcomePathBorder = new Border
         {
             Background = new SolidColorBrush(Color.FromArgb(15, 128, 128, 128)),
             BorderBrush = new SolidColorBrush(Color.FromArgb(30, 128, 128, 128)),
@@ -305,10 +312,10 @@ internal sealed class InstallerUiWindow : Window, IInstallerView
             TextWrapping = TextWrapping.Wrap,
             IsTextSelectionEnabled = true
         };
-        pathBorder.Child = _welcomePathText;
+        _welcomePathBorder.Child = _welcomePathText;
 
         infoPanel.Children.Add(_welcomeInfoText);
-        infoPanel.Children.Add(pathBorder);
+        infoPanel.Children.Add(_welcomePathBorder);
         Grid.SetRow(infoPanel, 1);
         rightCol.Children.Add(infoPanel);
 
@@ -325,6 +332,7 @@ internal sealed class InstallerUiWindow : Window, IInstallerView
             Content = "Cancel",
             MinWidth = 88
         };
+        AutomationProperties.SetAutomationId(welcomeCancelBtn, "WelcomeCancelButton");
         welcomeCancelBtn.Click += (_, _) => OnWelcomeCancelClicked();
 
         var welcomeInstallBtn = new Button
@@ -333,6 +341,7 @@ internal sealed class InstallerUiWindow : Window, IInstallerView
             MinWidth = 88,
             Style = (Style)Microsoft.UI.Xaml.Application.Current.Resources["AccentButtonStyle"]
         };
+        AutomationProperties.SetAutomationId(welcomeInstallBtn, "WelcomeInstallButton");
         welcomeInstallBtn.Click += (_, _) => OnWelcomeInstallClicked();
 
         welcomeButtons.Children.Add(welcomeCancelBtn);
@@ -390,8 +399,14 @@ internal sealed class InstallerUiWindow : Window, IInstallerView
             _progressPanel.Visibility = Visibility.Collapsed;
 
             _welcomeHeaderTitle.Text = $"{appName} Installer";
-            _welcomeInfoText.Text = $"This installer will install {appName} to:";
+            // Manifests without file or directory targets have no install
+            // root to show; the consent page still appears for them.
+            var hasInstallDir = !string.IsNullOrWhiteSpace(installDir);
+            _welcomeInfoText.Text = hasInstallDir
+                ? $"This installer will install {appName} to:"
+                : $"This installer will install {appName}.";
             _welcomePathText.Text = installDir;
+            _welcomePathBorder.Visibility = hasInstallDir ? Visibility.Visible : Visibility.Collapsed;
             _welcomeTitle.Text = appName;
 
             if (!string.IsNullOrEmpty(brandingImage) && File.Exists(brandingImage))

@@ -446,7 +446,7 @@ fn main() {
                     && !preferences.json
                     && sys.ui_available()
                     && !failure_ux_shown()
-                    && !matches!(err, AppError::Cancelled)
+                    && !matches!(err, AppError::Cancelled | AppError::CancelledByUser)
                 {
                     let _ = sys.ui_report_error(&err.to_string());
                 }
@@ -472,7 +472,7 @@ fn main() {
 
 fn error_exit_code(err: &AppError) -> i32 {
     match err {
-        AppError::Cancelled => EXIT_CANCELLED,
+        AppError::Cancelled | AppError::CancelledByUser => EXIT_CANCELLED,
         AppError::Message(message) if message.contains("Elevation required") => {
             EXIT_ELEVATION_REQUIRED
         }
@@ -526,6 +526,7 @@ fn run(cli: Cli, sys: &dyn Sys, logger: &Logger) -> Result<(), AppError> {
 }
 
 fn package(manifest_path: &Path, output_root: &Path, logger: &Logger) -> Result<(), AppError> {
+    enforce_manifest_path_spacing(manifest_path)?;
     let manifest = read_install_manifest(manifest_path)?;
     let current_exe = std::env::current_exe()?;
     let manifest_dir = manifest_path
@@ -558,10 +559,10 @@ fn read_install_manifest(manifest_path: &Path) -> Result<InstallManifest, AppErr
     Ok(manifest)
 }
 
-fn enforce_manifest_file_name(
-    manifest_path: &Path,
-    manifest: &InstallManifest,
-) -> Result<(), AppError> {
+/// Packaging-time rule only: install must accept manifests from any
+/// directory because bundled installs extract under %TEMP%, which contains
+/// spaces for user profiles like `C:\Users\First Last`.
+fn enforce_manifest_path_spacing(manifest_path: &Path) -> Result<(), AppError> {
     let manifest_path_text = manifest_path.to_string_lossy();
     if contains_whitespace(&manifest_path_text) {
         return Err(AppError::Message(format!(
@@ -570,6 +571,13 @@ fn enforce_manifest_file_name(
         )));
     }
 
+    Ok(())
+}
+
+fn enforce_manifest_file_name(
+    manifest_path: &Path,
+    manifest: &InstallManifest,
+) -> Result<(), AppError> {
     let expected = expected_manifest_file_name(&manifest.app_name);
     let actual = manifest_path
         .file_name()
@@ -1013,14 +1021,17 @@ fn install(
         progress_override
     } else {
         let install_root = infer_install_root(&manifest, &resolver);
+        let branding_image = find_branding_image(manifest_path.parent(), install_root.as_deref());
+        let show_welcome = !automation && !manifest.app_name.trim().is_empty();
         start_gui_progress(
             ui_mode,
             sys,
             &format!("Installing {}", manifest.app_name),
             Some(&manifest.app_name),
             install_root.as_deref(),
+            branding_image.as_deref(),
+            show_welcome,
             install_total,
-            automation,
             &effective_logger,
         )?
     };
@@ -1361,8 +1372,9 @@ fn uninstall(
                 None
             },
             None,
+            None,
+            false,
             uninstall_total,
-            automation,
             logger,
         )?;
     }
@@ -1690,6 +1702,18 @@ fn infer_install_root(manifest: &InstallManifest, resolver: &win::PathResolver) 
     None
 }
 
+/// Branding ships with the payload, so the manifest directory is probed
+/// first; the install root only exists on reinstalls over a previous tree.
+fn find_branding_image(manifest_dir: Option<&Path>, install_root: Option<&Path>) -> Option<String> {
+    const BRANDING_FILE_NAMES: [&str; 3] = ["branding.png", "banner.png", "logo.png"];
+    manifest_dir
+        .into_iter()
+        .chain(install_root)
+        .flat_map(|root| BRANDING_FILE_NAMES.iter().map(move |name| root.join(name)))
+        .find(|path| path.is_file())
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
 fn install_uninstaller(uninstall_exe_path: &Path, logger: &Logger) -> Result<(), AppError> {
     if let Some(parent) = uninstall_exe_path.parent() {
         fs::create_dir_all(parent)?;
@@ -1853,8 +1877,9 @@ fn start_gui_progress(
     title: &str,
     app_name: Option<&str>,
     install_root: Option<&Path>,
+    branding_image: Option<&str>,
+    show_welcome: bool,
     total_steps: usize,
-    automation: bool,
     logger: &Logger,
 ) -> Result<Option<Box<dyn ProgressSink>>, AppError> {
     trace_event(
@@ -1862,7 +1887,8 @@ fn start_gui_progress(
         json!({
             "ui_mode": ui_mode_name(ui_mode),
             "title": title,
-            "total_steps": total_steps.max(1)
+            "total_steps": total_steps.max(1),
+            "show_welcome": show_welcome
         }),
     );
     if let Some(sink) = sys.start_progress(ui_mode, title, total_steps.max(1))? {
@@ -1875,8 +1901,9 @@ fn start_gui_progress(
             install_root
                 .map(|p| p.to_string_lossy().into_owned())
                 .as_deref(),
+            branding_image,
+            show_welcome,
             total_steps.max(1),
-            automation,
             logger,
         )?)))
     } else {
@@ -2805,13 +2832,66 @@ path = '{LocalAppData}\Legacy\bin'
             .to_string();
         assert!(err.contains("SampleApp-install.toml"));
 
-        let err = enforce_manifest_file_name(
+        // Only the file name is constrained at install time; the directory may
+        // contain spaces (bundled installs extract under %TEMP%).
+        enforce_manifest_file_name(
             Path::new("manifest folder\\SampleApp-install.toml"),
             &manifest,
         )
-        .unwrap_err()
-        .to_string();
+        .unwrap();
+    }
+
+    #[test]
+    fn manifest_path_spacing_is_enforced_only_for_packaging() {
+        enforce_manifest_path_spacing(Path::new("C:\\work\\SampleApp-install.toml")).unwrap();
+
+        let err =
+            enforce_manifest_path_spacing(Path::new("manifest folder\\SampleApp-install.toml"))
+                .unwrap_err()
+                .to_string();
         assert!(err.contains("cannot contain spaces"));
+    }
+
+    #[test]
+    fn read_install_manifest_accepts_spaces_in_parent_directory() {
+        let temp = TestDir::new("manifest-spaced-parent");
+        let spaced_dir = temp.path().join("User Name");
+        fs::create_dir_all(&spaced_dir).unwrap();
+        let manifest_path = spaced_dir.join("SpacedDir-install.toml");
+        fs::write(&manifest_path, "app_name = 'Spaced Dir'\n").unwrap();
+
+        read_install_manifest(&manifest_path).unwrap();
+    }
+
+    #[test]
+    fn find_branding_image_prefers_manifest_dir_over_install_root() {
+        let temp = TestDir::new("branding-image");
+        let manifest_dir = temp.path().join("payload-src");
+        let install_root = temp.path().join("install-root");
+        fs::create_dir_all(&manifest_dir).unwrap();
+        fs::create_dir_all(&install_root).unwrap();
+
+        assert_eq!(
+            find_branding_image(Some(&manifest_dir), Some(&install_root)),
+            None
+        );
+
+        fs::write(install_root.join("logo.png"), b"png").unwrap();
+        assert_eq!(
+            find_branding_image(Some(&manifest_dir), Some(&install_root)),
+            Some(install_root.join("logo.png").to_string_lossy().into_owned())
+        );
+
+        fs::write(manifest_dir.join("branding.png"), b"png").unwrap();
+        assert_eq!(
+            find_branding_image(Some(&manifest_dir), Some(&install_root)),
+            Some(
+                manifest_dir
+                    .join("branding.png")
+                    .to_string_lossy()
+                    .into_owned()
+            )
+        );
     }
 
     #[test]
@@ -3055,8 +3135,9 @@ description = 'Description can have spaces'
                 "No UI",
                 None,
                 None,
-                0,
+                None,
                 false,
+                0,
                 &quiet_logger()
             )
             .unwrap()
@@ -4342,6 +4423,7 @@ description = 'Description can have spaces'
     #[test]
     fn error_exit_code_maps_cancelled_elevation_and_default() {
         assert_eq!(error_exit_code(&AppError::Cancelled), EXIT_CANCELLED);
+        assert_eq!(error_exit_code(&AppError::CancelledByUser), EXIT_CANCELLED);
         assert_eq!(
             error_exit_code(&AppError::Message(
                 "Elevation required to write to HKLM".into()

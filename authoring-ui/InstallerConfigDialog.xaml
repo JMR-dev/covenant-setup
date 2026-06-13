@@ -40,6 +40,7 @@
             Grid.Column="0"
             MinWidth="360"
             Header="Covenant Setup Executable"
+            AutomationProperties.AutomationId="CovenantSetupPathBox"
             PlaceholderText="C:\path\to\covenant-setup.exe"
             Text="{Binding CovenantSetupPath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
 
@@ -48,6 +49,7 @@
             Grid.Column="1"
             MinWidth="96"
             VerticalAlignment="Bottom"
+            AutomationProperties.AutomationId="BrowseCovenantSetupButton"
             Content="Browse"
             Click="BrowseCovenantSetupButton_Click" />
 
@@ -56,6 +58,7 @@
             Grid.Column="0"
             MinWidth="360"
             Header="Output Directory"
+            AutomationProperties.AutomationId="OutputDirectoryBox"
             PlaceholderText="C:\path\to\dist"
             Text="{Binding OutputDirectory, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
 
@@ -64,6 +67,7 @@
             Grid.Column="1"
             MinWidth="96"
             VerticalAlignment="Bottom"
+            AutomationProperties.AutomationId="ChooseOutputDirectoryButton"
             Content="Choose"
             Click="ChooseOutputDirectoryButton_Click" />
 

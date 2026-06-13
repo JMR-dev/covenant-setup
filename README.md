@@ -116,7 +116,7 @@ The current manifest supports:
 - `scripts`
 - `purge`
 
-Only `app_name` and shortcut `description` may contain spaces in manifest content. The manifest file path and every other manifest string field must be whitespace-free.
+Only `app_name` and shortcut `description` may contain spaces in manifest content. The manifest file name and every other manifest string field must be whitespace-free. The `package` command additionally rejects spaces anywhere in the manifest path; `install` accepts any directory, because bundled installs extract the manifest under `%TEMP%`, which contains spaces for user profiles like `C:\Users\First Last`.
 
 The sample manifest lives at [`examples/Covenant-SetupSampleApp-install.toml`](C:\Users\jasonross\workspace\covenant-setup\examples\Covenant-SetupSampleApp-install.toml).
 
@@ -177,7 +177,7 @@ Caveats:
 
 A Windows Hyper-V Vagrant VM now lives in [`Vagrantfile`](C:\Users\jasonross\workspace\covenant-setup\Vagrantfile), and the host harness in [`scripts/run-windows-vm-smoke.ps1`](C:\Users\jasonross\workspace\covenant-setup\scripts\run-windows-vm-smoke.ps1) packages `covenant-setup`, boots the VM, opens Hyper-V's console viewer, and runs the packaged installer inside the guest's interactive desktop session.
 
-The self-install manifest used for this path lives at [`vm/self-test/install.toml`](C:\Users\jasonross\workspace\covenant-setup\vm\self-test\install.toml). The guest verifies that install produced:
+The self-install manifest used for this path lives at [`vm/self-test/CovenantSetupSelfTest-install.toml`](C:\Users\jasonross\workspace\covenant-setup\vm\self-test\CovenantSetupSelfTest-install.toml). The guest verifies that install produced:
 
 - `%LOCALAPPDATA%\CovenantSetupSelfTest\bin\covenant-setup.exe`
 - `%LOCALAPPDATA%\CovenantSetupSelfTest\journal.json`
@@ -210,5 +210,5 @@ Notes:
 
 ### VM Coverage Harness
 
-In addition to the single-scenario smoke test, [`scripts/run-windows-vm-coverage.ps1`](C:\Users\jasonross\workspace\covenant-setup\scripts\run-windows-vm-coverage.ps1) walks every scenario manifest under `vm\<scenario>\install.toml` (`self-test`, `uac`, `hklm-registry`, `reboot`, `bundled-exec`) and delegates the in-guest assertions to [`scripts\windows-vm\coverage\<scenario>.ps1`](C:\Users\jasonross\workspace\covenant-setup\scripts\windows-vm\coverage). The scenarios exercise the elevation, MoveFileEx pending-rename / Restart Manager, HKLM-only registry, and bundled embedded-installer code paths that the unit tests stub out via `MockSys`.
+In addition to the single-scenario smoke test, [`scripts/run-windows-vm-coverage.ps1`](C:\Users\jasonross\workspace\covenant-setup\scripts\run-windows-vm-coverage.ps1) walks every scenario manifest under `vm\<scenario>\<AppName>-install.toml` (`self-test`, `uac`, `hklm-registry`, `reboot`, `bundled-exec`) and delegates the in-guest assertions to [`scripts\windows-vm\coverage\<scenario>.ps1`](C:\Users\jasonross\workspace\covenant-setup\scripts\windows-vm\coverage). The scenarios exercise the elevation, MoveFileEx pending-rename / Restart Manager, HKLM-only registry, and bundled embedded-installer code paths that the unit tests stub out via `MockSys`.
 - Use `-HaltAfter` or `-DestroyAfter` if you want the harness to stop the VM after the test run.

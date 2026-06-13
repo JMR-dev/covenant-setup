@@ -236,14 +236,14 @@ public class InstallerSessionControllerTests
     }
 
     [Fact]
-    public void HandleMessage_init_with_appName_and_installDir_shows_welcome_and_proceeds_on_install()
+    public void HandleMessage_init_with_show_welcome_shows_welcome_and_proceeds_on_install()
     {
         var view = new FakeInstallerView { WelcomeResponder = (app, dir, img) => "install" };
         var controller = new InstallerSessionController("dummy", view);
         using var sw = new StringWriter();
         controller.ResponseWriter = sw;
 
-        var ok = controller.HandleMessage("{\"type\":\"init\",\"title\":\"My Title\",\"app_name\":\"TestApp\",\"install_dir\":\"C:\\\\Test\",\"branding_image\":\"img.png\"}");
+        var ok = controller.HandleMessage("{\"type\":\"init\",\"show_welcome\":true,\"title\":\"My Title\",\"app_name\":\"TestApp\",\"install_dir\":\"C:\\\\Test\",\"branding_image\":\"img.png\"}");
 
         Assert.True(ok);
         Assert.Equal(2, view.Calls.Count);
@@ -258,14 +258,14 @@ public class InstallerSessionControllerTests
     }
 
     [Fact]
-    public void HandleMessage_init_with_appName_and_installDir_shows_welcome_and_cancels()
+    public void HandleMessage_init_with_show_welcome_shows_welcome_and_cancels()
     {
         var view = new FakeInstallerView { WelcomeResponder = (app, dir, img) => "cancel" };
         var controller = new InstallerSessionController("dummy", view);
         using var sw = new StringWriter();
         controller.ResponseWriter = sw;
 
-        var ok = controller.HandleMessage("{\"type\":\"init\",\"title\":\"My Title\",\"app_name\":\"TestApp\",\"install_dir\":\"C:\\\\Test\",\"branding_image\":\"img.png\"}");
+        var ok = controller.HandleMessage("{\"type\":\"init\",\"show_welcome\":true,\"title\":\"My Title\",\"app_name\":\"TestApp\",\"install_dir\":\"C:\\\\Test\",\"branding_image\":\"img.png\"}");
 
         Assert.False(ok);
         Assert.Equal(2, view.Calls.Count);
@@ -277,5 +277,40 @@ public class InstallerSessionControllerTests
         var root = responseDoc.RootElement;
         Assert.Equal("welcome_response", root.GetProperty("type").GetString());
         Assert.Equal("cancel", root.GetProperty("result").GetString());
+    }
+
+    [Fact]
+    public void HandleMessage_init_without_show_welcome_skips_welcome()
+    {
+        var view = new FakeInstallerView();
+        var controller = new InstallerSessionController("dummy", view);
+        using var sw = new StringWriter();
+        controller.ResponseWriter = sw;
+
+        var ok = controller.HandleMessage("{\"type\":\"init\",\"title\":\"My Title\",\"app_name\":\"TestApp\",\"install_dir\":\"C:\\\\Test\"}");
+
+        Assert.True(ok);
+        Assert.Single(view.Calls);
+        Assert.Equal("ShowInit: title=My Title, message=My Title", view.Calls[0]);
+        Assert.Equal(string.Empty, sw.ToString());
+    }
+
+    [Fact]
+    public void HandleMessage_init_with_show_welcome_but_no_install_dir_still_prompts()
+    {
+        var view = new FakeInstallerView { WelcomeResponder = (app, dir, img) => "install" };
+        var controller = new InstallerSessionController("dummy", view);
+        using var sw = new StringWriter();
+        controller.ResponseWriter = sw;
+
+        var ok = controller.HandleMessage("{\"type\":\"init\",\"show_welcome\":true,\"title\":\"My Title\",\"app_name\":\"TestApp\"}");
+
+        Assert.True(ok);
+        Assert.Equal(2, view.Calls.Count);
+        Assert.Equal("ShowWelcomeAsync: appName=TestApp, installDir=, brandingImage=", view.Calls[0]);
+
+        var written = sw.ToString().Trim();
+        using var responseDoc = JsonDocument.Parse(written);
+        Assert.Equal("welcome_response", responseDoc.RootElement.GetProperty("type").GetString());
     }
 }

@@ -105,7 +105,7 @@ This statically links the MSVC C runtime into the Rust executable, removing the 
 Manual PowerShell invocations of the Windows-subsystem Rust executable were misleading. A direct command such as:
 
 ```powershell
-target\release\covenant-setup.exe --json package vm\self-test\install.toml --output dist\vagrant-self-test
+target\release\covenant-setup.exe --json package vm\self-test\CovenantSetupSelfTest-install.toml --output dist\vagrant-self-test
 ```
 
 could return quickly with `EXIT=0` while the output file still matched the base executable size.

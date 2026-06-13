@@ -1,6 +1,7 @@
 use crate::{AppError, Logger, win};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::windows::process::CommandExt;
@@ -116,22 +117,12 @@ impl GuiProgress {
         title: &str,
         app_name: Option<&str>,
         install_root: Option<&str>,
+        branding_image: Option<&str>,
+        show_welcome: bool,
         total_steps: usize,
-        automation: bool,
         logger: &Logger,
     ) -> Result<Self, AppError> {
         let mut session = CSharpUiSession::start()?;
-
-        let branding_image = if let (Some(_), Some(root_path)) = (app_name, install_root) {
-            let root = Path::new(root_path);
-            ["branding.png", "banner.png", "logo.png"]
-                .iter()
-                .map(|name| root.join(name))
-                .find(|path| path.is_file())
-                .map(|path| path.to_string_lossy().into_owned())
-        } else {
-            None
-        };
 
         session.send(&json!({
             "type": "init",
@@ -140,7 +131,7 @@ impl GuiProgress {
             "install_dir": install_root,
             "branding_image": branding_image,
             "total_steps": total_steps.max(1),
-            "automation": automation,
+            "show_welcome": show_welcome,
         }))?;
 
         #[derive(Deserialize)]
@@ -150,7 +141,11 @@ impl GuiProgress {
             result: Option<String>,
         }
 
-        if app_name.is_some() && install_root.is_some() && !automation {
+        // The explicit show_welcome flag is the single source of truth for
+        // the handshake: the UI shows the welcome page and replies exactly
+        // when the init message carries it, so the two sides cannot disagree
+        // about whether a welcome_response is owed.
+        if show_welcome {
             let response: WelcomeResponse = session.read()?;
             if response.message_type != "welcome_response"
                 || response.result.as_deref() != Some("install")
@@ -343,7 +338,10 @@ struct CSharpUiSession {
     child: Child,
     reader: BufReader<fs::File>,
     writer: fs::File,
+    /// Raw bytes of a partial line pulled in by a non-blocking drain.
     pending_input: Vec<u8>,
+    /// Complete lines drained while polling that no consumer has read yet.
+    queued_lines: VecDeque<String>,
     cleanup_root: Option<PathBuf>,
     closed: bool,
     child_exited: bool,
@@ -376,6 +374,7 @@ impl CSharpUiSession {
             reader: BufReader::new(pipe),
             writer,
             pending_input: Vec::new(),
+            queued_lines: VecDeque::new(),
             cleanup_root,
             closed: false,
             child_exited: false,
@@ -393,11 +392,20 @@ impl CSharpUiSession {
     }
 
     fn read<T: for<'de> Deserialize<'de>>(&mut self) -> Result<T, AppError> {
-        let mut line = String::new();
-        let bytes = self.reader.read_line(&mut line)?;
-        if bytes == 0 {
-            return Err(AppError::Message("UI pipe closed before response".into()));
-        }
+        let line = match self.queued_lines.pop_front() {
+            Some(line) => line,
+            None => {
+                // Resume any partial line a non-blocking drain left behind
+                // before falling back to a blocking read.
+                let mut line = String::from_utf8_lossy(&self.pending_input).into_owned();
+                self.pending_input.clear();
+                let bytes = self.reader.read_line(&mut line)?;
+                if bytes == 0 {
+                    return Err(AppError::Message("UI pipe closed before response".into()));
+                }
+                line
+            }
+        };
         let value: Value = serde_json::from_str(&line)?;
         crate::trace_event("ui_pipe_receive", message_summary(&value));
         Ok(serde_json::from_value(value)?)
@@ -414,17 +422,17 @@ impl CSharpUiSession {
         Ok(())
     }
 
-    /// Drains any complete UI->engine lines and reports whether one was a
-    /// `cancel_request`. Never blocks: bytes are only pulled after
-    /// PeekNamedPipe says they are available, because a read left pending on
-    /// this synchronous pipe handle would serialize against (and stall) the
-    /// engine's progress writes on the same handle.
-    fn poll_cancel_request(&mut self, logger: &Logger) -> bool {
-        let mut saw_cancel = false;
+    /// Pulls every byte currently available on the pipe without blocking and
+    /// queues complete lines for `read` or `poll_cancel_request` to consume.
+    /// Bytes are only pulled after PeekNamedPipe says they are available,
+    /// because a read left pending on this synchronous pipe handle would
+    /// serialize against (and stall) the engine's progress writes on the
+    /// same handle.
+    fn drain_available_input(&mut self, logger: &Logger) {
         loop {
             let buffered = self.reader.buffer().len();
             if buffered > 0 {
-                // Leftover bytes the welcome-handshake read pulled in.
+                // Leftover bytes a previous blocking read pulled in.
                 let chunk = self.reader.buffer().to_vec();
                 self.reader.consume(buffered);
                 self.pending_input.extend_from_slice(&chunk);
@@ -443,15 +451,28 @@ impl CSharpUiSession {
 
             while let Some(newline) = self.pending_input.iter().position(|byte| *byte == b'\n') {
                 let line: Vec<u8> = self.pending_input.drain(..=newline).collect();
-                let line = String::from_utf8_lossy(&line);
-                if let Ok(value) = serde_json::from_str::<Value>(&line)
-                    && value.get("type").and_then(Value::as_str) == Some("cancel_request")
-                {
-                    crate::trace_event("ui_cancel_request", json!({}));
-                    saw_cancel = true;
-                }
+                self.queued_lines
+                    .push_back(String::from_utf8_lossy(&line).into_owned());
             }
         }
+    }
+
+    /// Reports whether the UI sent a `cancel_request`. Only cancel lines are
+    /// consumed; every other UI->engine line stays queued for the next
+    /// blocking `read` instead of being dropped.
+    fn poll_cancel_request(&mut self, logger: &Logger) -> bool {
+        self.drain_available_input(logger);
+        let mut saw_cancel = false;
+        self.queued_lines.retain(|line| {
+            let is_cancel = serde_json::from_str::<Value>(line).is_ok_and(|value| {
+                value.get("type").and_then(Value::as_str) == Some("cancel_request")
+            });
+            if is_cancel {
+                crate::trace_event("ui_cancel_request", json!({}));
+                saw_cancel = true;
+            }
+            !is_cancel
+        });
         saw_cancel
     }
 }

@@ -248,6 +248,27 @@ internal sealed class InstallerConfigViewModel : INotifyPropertyChanged
         HasManifestValidationErrors = hasErrors;
     }
 
+    /// <summary>
+    /// Seeds the dialog from the owning view model's committed state so the
+    /// main window stays the single source of truth: Close discards edits,
+    /// Save and Close commits them back.
+    /// </summary>
+    public void SyncFrom(CovenantSetupTool? tool, string outputDirectory)
+    {
+        if (tool is null)
+        {
+            SyncToolPath(string.Empty);
+            ClearValidatedTool(MissingToolStatus);
+        }
+        else
+        {
+            AcceptValidatedTool(tool);
+        }
+
+        OutputDirectory = outputDirectory;
+        SetMessage(string.Empty, InstallerConfigStatusKind.Neutral);
+    }
+
     public async Task<bool> SaveConfigAsync(CancellationToken cancellationToken = default)
     {
         if (IsBuilding)

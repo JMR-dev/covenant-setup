@@ -1,5 +1,5 @@
 # install-fail-errata: failure with errata details
-{"type":"init","title":"Installing SampleApp","message":"Preparing...","total_steps":8,"app_name":"SampleApp","install_dir":"C:\\Program Files\\SampleApp"}
+{"type":"init","show_welcome":true,"title":"Installing SampleApp","message":"Preparing...","total_steps":8,"app_name":"SampleApp","install_dir":"C:\\Program Files\\SampleApp"}
 {"await_response":{"id":"welcome","expect":"install"}}
 {"wait_ms": 200}
 {"type":"progress","current_step":1,"total_steps":8,"message":"Creating directories"}

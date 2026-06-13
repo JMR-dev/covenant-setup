@@ -154,8 +154,8 @@ internal sealed class UiMessage
     [JsonPropertyName("branding_image")]
     public string? BrandingImage { get; set; }
 
-    [JsonPropertyName("automation")]
-    public bool? Automation { get; set; }
+    [JsonPropertyName("show_welcome")]
+    public bool? ShowWelcome { get; set; }
 }
 
 internal sealed class UiResponse

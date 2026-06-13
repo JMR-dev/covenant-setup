@@ -72,4 +72,4 @@ the example manifest (`examples/Covenant-SetupSampleApp-install.toml`).
 
 ## VM coverage harness
 
-`scripts\run-windows-vm-coverage.ps1` walks every scenario directory under `vm\<scenario>\install.toml` and delegates per-scenario in-guest assertions to `scripts\windows-vm\coverage\<scenario>.ps1`. The bundled scenarios (`self-test`, `uac`, `hklm-registry`, `reboot`, `bundled-exec`) exercise the elevation, MoveFileEx pending-rename, HKLM-registry, and embedded-bundle code paths. The harness builds the release binary and dispatches scenarios in-place; pass `-SkipBuild` to reuse a prior build.
+`scripts\run-windows-vm-coverage.ps1` walks every scenario directory under `vm\<scenario>\<AppName>-install.toml` (the manifest file name is discovered per scenario) and delegates per-scenario in-guest assertions to `scripts\windows-vm\coverage\<scenario>.ps1`. The bundled scenarios (`self-test`, `uac`, `hklm-registry`, `reboot`, `bundled-exec`) exercise the elevation, MoveFileEx pending-rename, HKLM-registry, and embedded-bundle code paths. The harness builds the release binary and dispatches scenarios in-place; pass `-SkipBuild` to reuse a prior build.

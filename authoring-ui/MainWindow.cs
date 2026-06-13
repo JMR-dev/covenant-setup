@@ -54,6 +54,21 @@ internal sealed class MainWindow : Window
     public MainWindow()
     {
         Title = "Covenant Setup Manifest Authoring";
+
+        // Parse command line arguments for testing (to avoid interactive file pickers)
+        var args = Environment.GetCommandLineArgs();
+        for (int i = 1; i < args.Length - 1; i++)
+        {
+            if (args[i] == "--manifest-path")
+            {
+                _lastSavedManifestPath = args[i + 1];
+            }
+            else if (args[i] == "--tool-path")
+            {
+                _viewModel.SetCovenantSetupTool(new CovenantSetupTool(args[i + 1]));
+            }
+        }
+
         Content = BuildContent();
         ApplyInitialTheme();
         ConfigureWindow();
@@ -117,6 +132,7 @@ internal sealed class MainWindow : Window
             TextWrapping = TextWrapping.Wrap,
             MaxLines = 3
         };
+        AutomationProperties.SetAutomationId(_statusText, "ValidationSummaryText");
         _statusText.SetBinding(
             TextBlock.TextProperty,
             new Binding
@@ -183,23 +199,28 @@ internal sealed class MainWindow : Window
             OffContent = string.Empty,
             MinWidth = 72
         };
+        AutomationProperties.SetAutomationId(_themeToggle, "ThemeToggle");
         _themeToggle.Toggled += (_, _) => ToggleTheme();
         themeControl.Children.Add(_themeToggle);
         actions.Children.Add(themeControl);
 
         var validateButton = new Button { Content = "Validate", MinWidth = 92 };
+        AutomationProperties.SetAutomationId(validateButton, "ValidateButton");
         validateButton.Click += async (_, _) => await ShowValidationAsync();
         actions.Children.Add(validateButton);
 
         var installerConfigButton = new Button { Content = "Installer Config", MinWidth = 124 };
+        AutomationProperties.SetAutomationId(installerConfigButton, "InstallerConfigButton");
         installerConfigButton.Click += async (_, _) => await ShowInstallerConfigAsync();
         actions.Children.Add(installerConfigButton);
 
         _generateInstallerButton = new Button { Content = "Save and Build", MinWidth = 124 };
+        AutomationProperties.SetAutomationId(_generateInstallerButton, "SaveAndBuildButton");
         _generateInstallerButton.Click += async (_, _) => await GenerateInstallerAsync();
         actions.Children.Add(_generateInstallerButton);
 
         var saveButton = new Button { Content = "Save TOML", MinWidth = 104 };
+        AutomationProperties.SetAutomationId(saveButton, "SaveButton");
         saveButton.Click += async (_, _) => await SaveManifestAsync();
         actions.Children.Add(saveButton);
 
@@ -251,6 +272,7 @@ internal sealed class MainWindow : Window
         });
 
         _copyPreviewButton = new Button { Content = "Copy", MinWidth = 80 };
+        AutomationProperties.SetAutomationId(_copyPreviewButton, "CopyPreviewButton");
         AutomationProperties.SetName(_copyPreviewButton, "Copy TOML preview");
         _copyPreviewButton.Click += async (_, _) => await CopyPreviewAsync();
         Grid.SetColumn(_copyPreviewButton, 1);
@@ -267,6 +289,7 @@ internal sealed class MainWindow : Window
             IsReadOnly = true,
             TextWrapping = TextWrapping.NoWrap
         };
+        AutomationProperties.SetAutomationId(_previewBox, "PreviewBox");
         _previewBox.SetBinding(
             TextBox.TextProperty,
             new Binding
@@ -294,6 +317,7 @@ internal sealed class MainWindow : Window
             SelectedItem = _viewModel.InstallRootToken,
             MinWidth = 180
         };
+        AutomationProperties.SetAutomationId(rootCombo, "InstallRootTokenCombo");
         rootCombo.SelectionChanged += (_, _) =>
         {
             if (rootCombo.SelectedItem is string token)
@@ -314,6 +338,7 @@ internal sealed class MainWindow : Window
     private FrameworkElement BuildDirectoriesSection()
     {
         var pathBox = new TextBox();
+        AutomationProperties.SetAutomationId(pathBox, "DirectoryPathBox");
         pathBox.SetBinding(
             TextBox.PlaceholderTextProperty,
             new Binding
@@ -323,6 +348,7 @@ internal sealed class MainWindow : Window
             });
         var rows = RemovableRows(_viewModel.Directories);
         var addButton = new Button { Content = "Add Path", MinWidth = 88 };
+        AutomationProperties.SetAutomationId(addButton, "AddDirectoryButton");
         addButton.Click += (_, _) =>
         {
             _viewModel.AddDirectory(pathBox.Text);
@@ -338,7 +364,9 @@ internal sealed class MainWindow : Window
     private FrameworkElement BuildFilesSection()
     {
         var sourceBox = new TextBox { PlaceholderText = @"payload\app.exe" };
+        AutomationProperties.SetAutomationId(sourceBox, "FileSourceBox");
         var destinationBox = new TextBox();
+        AutomationProperties.SetAutomationId(destinationBox, "FileDestinationBox");
         destinationBox.SetBinding(
             TextBox.PlaceholderTextProperty,
             new Binding
@@ -348,6 +376,7 @@ internal sealed class MainWindow : Window
             });
         var rows = RemovableRows(_viewModel.Files);
         var addButton = new Button { Content = "Add", MinWidth = 72 };
+        AutomationProperties.SetAutomationId(addButton, "AddFileButton");
         addButton.Click += async (_, _) =>
         {
             if (string.IsNullOrWhiteSpace(sourceBox.Text) || string.IsNullOrWhiteSpace(destinationBox.Text))
@@ -371,8 +400,11 @@ internal sealed class MainWindow : Window
     private FrameworkElement BuildRegistrySection()
     {
         var keyBox = new TextBox { PlaceholderText = @"HKCU\Software\VendorApp" };
+        AutomationProperties.SetAutomationId(keyBox, "RegistryKeyBox");
         var nameBox = new TextBox { PlaceholderText = "InstallRoot" };
+        AutomationProperties.SetAutomationId(nameBox, "RegistryNameBox");
         var valueBox = new TextBox();
+        AutomationProperties.SetAutomationId(valueBox, "RegistryValueBox");
         valueBox.SetBinding(
             TextBox.PlaceholderTextProperty,
             new Binding
@@ -382,6 +414,7 @@ internal sealed class MainWindow : Window
             });
         var rows = RemovableRows(_viewModel.Registry);
         var addButton = new Button { Content = "Add", MinWidth = 72 };
+        AutomationProperties.SetAutomationId(addButton, "AddRegistryButton");
         addButton.Click += async (_, _) =>
         {
             if (string.IsNullOrWhiteSpace(keyBox.Text) ||
@@ -418,13 +451,16 @@ internal sealed class MainWindow : Window
     private FrameworkElement BuildScriptsSection()
     {
         var commandBox = new TextBox { PlaceholderText = "powershell" };
+        AutomationProperties.SetAutomationId(commandBox, "ScriptCommandBox");
         var argsBox = new TextBox
         {
             AcceptsReturn = true,
             Height = 76,
             PlaceholderText = "-ExecutionPolicy"
         };
+        AutomationProperties.SetAutomationId(argsBox, "ScriptArgsBox");
         var workingDirectoryBox = new TextBox();
+        AutomationProperties.SetAutomationId(workingDirectoryBox, "ScriptWorkingDirBox");
         workingDirectoryBox.SetBinding(
             TextBox.PlaceholderTextProperty,
             new Binding
@@ -434,6 +470,7 @@ internal sealed class MainWindow : Window
             });
         var rows = RemovableRows(_viewModel.Scripts);
         var addButton = new Button { Content = "Add", MinWidth = 72 };
+        AutomationProperties.SetAutomationId(addButton, "AddScriptButton");
         addButton.Click += async (_, _) =>
         {
             if (string.IsNullOrWhiteSpace(commandBox.Text))
@@ -464,6 +501,9 @@ internal sealed class MainWindow : Window
     {
         _installerConfigViewModel.SetManifestValidationState(_viewModel.HasValidationErrors);
         _installerConfigViewModel.IsBuilding = _isPackaging;
+        // The main view model owns the committed tool/output state; the dialog
+        // is a transient editor seeded on open so Close discards edits.
+        _installerConfigViewModel.SyncFrom(_viewModel.CovenantSetupTool, _viewModel.OutputDirectory);
 
         var dialog = new InstallerConfigDialog(
             _installerConfigViewModel,
@@ -556,38 +596,44 @@ internal sealed class MainWindow : Window
     private async Task GenerateInstallerAsync(Func<string, string, Task>? showMessageAsync = null)
     {
         showMessageAsync ??= ShowNoticeAsync;
-        var tool = _viewModel.CovenantSetupTool;
-        if (tool is null)
-        {
-            await showMessageAsync("Installer EXE", "covenant-setup.exe was not found. Packaging is disabled.");
-            return;
-        }
-
-        var validation = _viewModel.Validate();
-        if (!validation.IsValid)
-        {
-            await showMessageAsync("Validation", string.Join(Environment.NewLine, validation.Errors));
-            return;
-        }
-
-        if (string.IsNullOrWhiteSpace(_viewModel.OutputDirectory))
-        {
-            await showMessageAsync("Installer EXE", "Choose an output directory before packaging.");
-            return;
-        }
-
-        var manifestPath = await WriteManifestWithPickerAsync(showNotice: false, showMessageAsync);
-        if (manifestPath is null)
+        // The packaging flag must be set before the first await so a second
+        // click cannot start a concurrent run against the same output EXE.
+        if (_isPackaging)
         {
             return;
         }
-        _lastSavedManifestPath = manifestPath;
-
         _isPackaging = true;
         _installerConfigViewModel.IsBuilding = true;
         RefreshPackageControls();
         try
         {
+            var tool = _viewModel.CovenantSetupTool;
+            if (tool is null)
+            {
+                await showMessageAsync("Installer EXE", "covenant-setup.exe was not found. Packaging is disabled.");
+                return;
+            }
+
+            var validation = _viewModel.Validate();
+            if (!validation.IsValid)
+            {
+                await showMessageAsync("Validation", string.Join(Environment.NewLine, validation.Errors));
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(_viewModel.OutputDirectory))
+            {
+                await showMessageAsync("Installer EXE", "Choose an output directory before packaging.");
+                return;
+            }
+
+            var manifestPath = await WriteManifestWithPickerAsync(showNotice: false, showMessageAsync);
+            if (manifestPath is null)
+            {
+                return;
+            }
+            _lastSavedManifestPath = manifestPath;
+
             var result = await CovenantSetupPackager.PackageAsync(
                 tool,
                 manifestPath,
@@ -1140,6 +1186,7 @@ internal sealed class MainWindow : Window
     private static TextBox BoundTextBox(string propertyName, string placeholder)
     {
         var box = new TextBox { PlaceholderText = placeholder };
+        AutomationProperties.SetAutomationId(box, propertyName);
         box.SetBinding(
             TextBox.TextProperty,
             new Binding
@@ -1375,7 +1422,7 @@ internal sealed class MainWindow : Window
 
     private static IReadOnlyList<string> SplitLines(string value) =>
         value.Split(
-            [Environment.NewLine, "\n"],
+            [Environment.NewLine, "\n", "\r"],
             StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
     private sealed record ThemeBrushes(

@@ -522,8 +522,9 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
 
     private string ShortcutFileName(string target)
     {
-        var fileName = FileNameWithoutExtension(target);
-        var sanitized = SanitizeIdentifier(fileName);
+        // The empty-checked variant keeps the folder/app-name fallback
+        // reachable when the target file name sanitizes to nothing.
+        var sanitized = SanitizeIdentifierOrEmpty(FileNameWithoutExtension(target));
         if (!string.IsNullOrWhiteSpace(sanitized))
         {
             return sanitized;
@@ -678,9 +679,12 @@ internal sealed partial class MainViewModel : INotifyPropertyChanged
 
     private static string SanitizeIdentifier(string value)
     {
-        var sanitized = IdentifierRegex().Replace(value.Trim(), "_").Trim('_');
+        var sanitized = SanitizeIdentifierOrEmpty(value);
         return string.IsNullOrWhiteSpace(sanitized) ? "covenant_setup" : sanitized;
     }
+
+    private static string SanitizeIdentifierOrEmpty(string value) =>
+        IdentifierRegex().Replace(value.Trim(), "_").Trim('_');
 
     internal static string ManifestFileName(string appName)
     {

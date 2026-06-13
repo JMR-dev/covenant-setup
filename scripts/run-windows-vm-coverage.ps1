@@ -16,8 +16,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 # Coverage-harness orchestrator. Drives the Vagrant Windows VM through every
-# scenario directory under vm\<scenario>\install.toml using the per-scenario
-# guest scripts under scripts\windows-vm\coverage\<scenario>.ps1.
+# scenario directory under vm\<scenario>\<AppName>-install.toml using the
+# per-scenario guest scripts under scripts\windows-vm\coverage\<scenario>.ps1.
 #
 # All install/uninstall side effects happen INSIDE the VM. The host only:
 #   1. Builds covenant-setup.exe (release).
@@ -73,6 +73,21 @@ function Open-HyperVViewer {
     Start-Process -FilePath $vmConnect -ArgumentList @("localhost", $VmName) | Out-Null
 }
 
+# The engine enforces the <AppName>-install.toml naming convention, so each
+# scenario directory carries its own manifest file name; discover it instead
+# of hardcoding install.toml.
+function Get-ScenarioManifest {
+    param([Parameter(Mandatory)][string]$ScenarioDir)
+    $candidates = @(Get-ChildItem -LiteralPath $ScenarioDir -Filter "*install.toml" -File | Sort-Object Name)
+    if ($candidates.Count -eq 0) {
+        throw "Scenario manifest (*install.toml) not found in: $ScenarioDir"
+    }
+    if ($candidates.Count -gt 1) {
+        throw "Multiple *install.toml manifests found in: $ScenarioDir"
+    }
+    return $candidates[0]
+}
+
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $releaseExe = Join-Path $repoRoot "target\release\covenant-setup.exe"
 $outputRoot = Join-Path $repoRoot "dist\vagrant-coverage"
@@ -98,10 +113,7 @@ if (-not (Test-Path -LiteralPath $releaseExe)) {
 # Stage the payload tree for each scenario manifest that references
 # payload\covenant-setup.exe (relative to the manifest dir).
 foreach ($scenario in $Scenarios) {
-    $manifest = Join-Path $repoRoot "vm\$scenario\install.toml"
-    if (-not (Test-Path -LiteralPath $manifest)) {
-        throw "Scenario manifest not found: $manifest"
-    }
+    $manifest = (Get-ScenarioManifest -ScenarioDir (Join-Path $repoRoot "vm\$scenario")).FullName
     $payloadDir = Join-Path $repoRoot "vm\$scenario\payload"
     $manifestText = Get-Content -LiteralPath $manifest -Raw
     if ($manifestText -match 'payload\\\\covenant-setup\.exe' -or $manifestText -match 'payload[\\/]covenant-setup\.exe') {
@@ -122,7 +134,16 @@ try {
         Open-HyperVViewer -VmName $VmName
     }
 
-    $waitForShellCommand = "for (`$i = 0; `$i -lt 90; `$i++) { if (Get-Process -Name explorer -ErrorAction SilentlyContinue) { exit 0 }; Start-Sleep -Seconds 2 }; Write-Error 'Explorer shell did not start in time.'; exit 1"
+    $waitForShellCommand = @(
+        "for (`$i = 0; `$i -lt 90; `$i++) { if (Get-Process -Name explorer -ErrorAction SilentlyContinue) { exit 0 }; Start-Sleep -Seconds 2 }"
+        "`$winlogon = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'"
+        "Write-Output ('consoleUser=' + (Get-CimInstance Win32_ComputerSystem).UserName)"
+        "Write-Output ('computerName=' + `$env:COMPUTERNAME)"
+        "foreach (`$name in 'AutoAdminLogon','ForceAutoLogon','DefaultUserName','DefaultDomainName','AutoLogonCount') { `$value = `$winlogon.PSObject.Properties[`$name]; Write-Output (`$name + '=' + `$(if (`$value) { `$value.Value } else { '<absent>' })) }"
+        "Write-Output ('DefaultPassword=' + `$(if (`$winlogon.PSObject.Properties['DefaultPassword']) { '<set>' } else { '<absent>' }))"
+        "Write-Error 'Explorer shell did not start in time. Auto-logon state is printed above.'"
+        "exit 1"
+    ) -join "; "
     Invoke-Vagrant -Arguments @("winrm", "-s", "powershell", "-c", $waitForShellCommand)
 
     # Prepare guest layout.
@@ -156,7 +177,8 @@ try {
         Write-Host ""
         Write-Host "[coverage] -> $scenario" -ForegroundColor Cyan
         $remoteScript = Join-Path $guestScriptRoot "$scenario.ps1"
-        $remoteManifest = Join-Path $guestScenarioRoot "$scenario\install.toml"
+        $manifestName = (Get-ScenarioManifest -ScenarioDir (Join-Path $repoRoot "vm\$scenario")).Name
+        $remoteManifest = Join-Path $guestScenarioRoot "$scenario\$manifestName"
         $remoteWork = Join-Path $guestWorkRoot $scenario
         $logRel = "$scenario\guest.log"
         $remoteLog = Join-Path $guestWorkRoot $logRel

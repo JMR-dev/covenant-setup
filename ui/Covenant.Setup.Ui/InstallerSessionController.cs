@@ -106,10 +106,16 @@ internal sealed class InstallerSessionController(string pipeName, IInstallerView
         {
             case "init":
                 var title = message.Title ?? "covenant-setup";
-                if (!string.IsNullOrEmpty(message.AppName) && !string.IsNullOrEmpty(message.InstallDir) && message.Automation != true)
+                // The engine's explicit show_welcome flag is the single source
+                // of truth for the handshake; it awaits a welcome_response
+                // exactly when it sent the flag.
+                if (message.ShowWelcome == true)
                 {
                     UiTrace.Write("welcome_show_requested", new { message.AppName, message.InstallDir });
-                    var welcomeResult = view.ShowWelcomeAsync(message.AppName, message.InstallDir, message.BrandingImage).GetAwaiter().GetResult();
+                    var welcomeResult = view.ShowWelcomeAsync(
+                        string.IsNullOrEmpty(message.AppName) ? title : message.AppName,
+                        message.InstallDir ?? string.Empty,
+                        message.BrandingImage).GetAwaiter().GetResult();
                     UiTrace.Write("welcome_response", new { Result = welcomeResult });
 
                     WriteResponse(new UiResponse

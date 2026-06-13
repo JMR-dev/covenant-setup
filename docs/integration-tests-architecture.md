@@ -158,11 +158,11 @@ inside the VM; the host only builds the binary and drives Vagrant over WinRM.
 
 ```
 vm/
-  self-test/install.toml        Legacy smoke test (HKCU + LocalAppData)
-  uac/install.toml              ProgramFiles target → forces elevation probe
-  hklm-registry/install.toml   HKLM registry key → forces elevation via root
-  reboot/install.toml           Payload + script that self-locks file
-  bundled-exec/install.toml     Packaged installer bundle (HKCU + LocalAppData)
+  self-test/CovenantSetupSelfTest-install.toml        Legacy smoke test (HKCU + LocalAppData)
+  uac/CovenantSetupUACScenario-install.toml           ProgramFiles target → forces elevation probe
+  hklm-registry/CovenantSetupHKLMRegistryScenario-install.toml   HKLM registry key → forces elevation via root
+  reboot/CovenantSetupRebootScenario-install.toml     Payload + script that self-locks file
+  bundled-exec/CovenantSetupBundledExecScenario-install.toml     Packaged installer bundle (HKCU + LocalAppData)
 
 scripts/
   run-windows-vm-coverage.ps1             Host-side orchestrator

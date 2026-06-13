@@ -321,6 +321,43 @@ try {
         timeoutSeconds = $TimeoutSeconds
     }
 
+    # Install VC++ Redistributable if missing
+    $vcredistInstalled = $false
+    $vcredistKey = "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64"
+    if (Test-Path -Path $vcredistKey) {
+        $vcredistVal = Get-ItemProperty -Path $vcredistKey -Name "Installed" -ErrorAction SilentlyContinue
+        if ($vcredistVal -and $vcredistVal.Installed -eq 1) {
+            $vcredistInstalled = $true
+        }
+    }
+
+    if (-not $vcredistInstalled) {
+        Write-TraceEvent -Phase "vcredist_install_start"
+        try {
+            $vcredistPath = Join-Path $env:TEMP "vc_redist.x64.exe"
+            Remove-Item -Path $vcredistPath -Force -ErrorAction SilentlyContinue
+            Write-Host "Downloading VC++ Redistributable..."
+            $oldProgress = $ProgressPreference
+            $ProgressPreference = 'SilentlyContinue'
+            Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile $vcredistPath
+            $ProgressPreference = $oldProgress
+            
+            Write-Host "Installing VC++ Redistributable..."
+            $proc = Start-Process -FilePath $vcredistPath -ArgumentList "/install", "/quiet", "/norestart" -PassThru -Wait
+            if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) { # 3010 is success but reboot required
+                throw "vc_redist installation failed with exit code $($proc.ExitCode)"
+            }
+            Write-TraceEvent -Phase "vcredist_install_success" -Detail @{ exitCode = $proc.ExitCode }
+        }
+        catch {
+            Write-TraceEvent -Phase "vcredist_install_error" -Detail @{ error = $_.Exception.Message }
+            Write-Warning "Failed to install VC++ Redistributable: $($_.Exception.Message)"
+        }
+    }
+    else {
+        Write-TraceEvent -Phase "vcredist_already_installed"
+    }
+
     if (-not (Test-Path -LiteralPath $InstallerPath)) {
         throw "Installer not found in guest: $InstallerPath"
     }

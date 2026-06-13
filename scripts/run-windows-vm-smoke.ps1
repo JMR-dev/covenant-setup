@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$Provider = "hyperv",
-    [string]$ManifestPath = "vm\self-test\install.toml",
+    [string]$ManifestPath = "vm\self-test\CovenantSetupSelfTest-install.toml",
     [string]$OutputRoot = "dist\vagrant-self-test",
     [string]$VmName = $(if ($env:COVENANT_VM_NAME) { $env:COVENANT_VM_NAME } else { "covenant-setup-windows" }),
     [string]$GuestUsername = $(if ($env:COVENANT_WINRM_USERNAME) { $env:COVENANT_WINRM_USERNAME } else { "vagrant" }),
@@ -244,7 +244,16 @@ try {
         Open-HyperVViewer -VmName $VmName
     }
 
-    $waitForShellCommand = "for (`$i = 0; `$i -lt 90; `$i++) { if (Get-Process -Name explorer -ErrorAction SilentlyContinue) { exit 0 }; Start-Sleep -Seconds 2 }; Write-Error 'Explorer shell did not start in time.'; exit 1"
+    $waitForShellCommand = @(
+        "for (`$i = 0; `$i -lt 90; `$i++) { if (Get-Process -Name explorer -ErrorAction SilentlyContinue) { exit 0 }; Start-Sleep -Seconds 2 }"
+        "`$winlogon = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'"
+        "Write-Output ('consoleUser=' + (Get-CimInstance Win32_ComputerSystem).UserName)"
+        "Write-Output ('computerName=' + `$env:COMPUTERNAME)"
+        "foreach (`$name in 'AutoAdminLogon','ForceAutoLogon','DefaultUserName','DefaultDomainName','AutoLogonCount') { `$value = `$winlogon.PSObject.Properties[`$name]; Write-Output (`$name + '=' + `$(if (`$value) { `$value.Value } else { '<absent>' })) }"
+        "Write-Output ('DefaultPassword=' + `$(if (`$winlogon.PSObject.Properties['DefaultPassword']) { '<set>' } else { '<absent>' }))"
+        "Write-Error 'Explorer shell did not start in time. Auto-logon state is printed above.'"
+        "exit 1"
+    ) -join "; "
     Invoke-Vagrant -Arguments @("winrm", "-s", "powershell", "-c", $waitForShellCommand)
 
     Invoke-Vagrant -Arguments @("winrm", "-s", "powershell", "-c", "New-Item -ItemType Directory -Force -Path '$guestRoot' | Out-Null; New-Item -ItemType Directory -Force -Path '$guestScriptRoot' | Out-Null")
@@ -257,6 +266,38 @@ try {
     ) -join "; "
     Invoke-Vagrant -Arguments @("winrm", "-s", "powershell", "-c", $clearGuestTraceCommand)
     Invoke-Vagrant -Arguments @("upload", $installerPath, $guestInstallerPath)
+    
+    # Zip the ui folder, excluding bin/obj directories to keep it small
+    $uiZipPath = Join-Path $outputRootAbs "ui.zip"
+    Remove-Item -LiteralPath $uiZipPath -Force -ErrorAction SilentlyContinue
+    
+    $zipScript = @(
+        "& {"
+        "  `$uiPath = '$repoRoot\ui'"
+        "  `$zipPath = '$uiZipPath'"
+        "  `$tempDir = Join-Path '$outputRootAbs' 'ui-temp'"
+        "  Remove-Item -LiteralPath `$tempDir -Recurse -Force -ErrorAction SilentlyContinue"
+        "  New-Item -ItemType Directory -Force -Path `$tempDir | Out-Null"
+        "  Get-ChildItem -Path `$uiPath -Recurse | Where-Object { `$_.FullName -notmatch '\\(bin|obj|TestResults|\.vs)($|\\)' } | ForEach-Object {"
+        "    `$relative = `$_.FullName.Substring(`$uiPath.Length + 1)"
+        "    `$target = Join-Path `$tempDir `$relative"
+        "    if (`$_.PSIsContainer) {"
+        "      New-Item -ItemType Directory -Force -Path `$target | Out-Null"
+        "    } else {"
+        "      `$targetParent = Split-Path -Parent `$target"
+        "      New-Item -ItemType Directory -Force -Path `$targetParent -ErrorAction SilentlyContinue | Out-Null"
+        "      Copy-Item -LiteralPath `$_.FullName -Destination `$target -Force"
+        "    }"
+        "  }"
+        "  Compress-Archive -Path (Join-Path `$tempDir '*') -DestinationPath `$zipPath -Force"
+        "  Remove-Item -LiteralPath `$tempDir -Recurse -Force -ErrorAction SilentlyContinue"
+        "}"
+    ) -join "`n"
+    powershell.exe -NoProfile -Command $zipScript
+
+    Invoke-Vagrant -Arguments @("upload", $uiZipPath, "$guestRoot\ui.zip")
+    Invoke-Vagrant -Arguments @("winrm", "-s", "powershell", "-c", "if (Test-Path -LiteralPath '$guestRoot\ui') { Remove-Item -LiteralPath '$guestRoot\ui' -Recurse -Force -ErrorAction SilentlyContinue }; Expand-Archive -Path '$guestRoot\ui.zip' -DestinationPath '$guestRoot\ui' -Force")
+
     Invoke-Vagrant -Arguments @("upload", (Join-Path $repoRoot "scripts\windows-vm\Invoke-InteractiveInstaller.ps1"), (Join-Path $guestScriptRoot "Invoke-InteractiveInstaller.ps1"))
     Invoke-Vagrant -Arguments @("upload", (Join-Path $repoRoot "scripts\windows-vm\Start-InteractiveSelfInstall.ps1"), (Join-Path $guestScriptRoot "Start-InteractiveSelfInstall.ps1"))
 

@@ -19,7 +19,7 @@ internal sealed class ScenarioBuilder
         return Init(title, message, appName: null, installDir: null);
     }
 
-    public ScenarioBuilder Init(string title, string message, string? appName, string? installDir, string? brandingImage = null)
+    public ScenarioBuilder Init(string title, string message, string? appName, string? installDir, string? brandingImage = null, bool showWelcome = false)
     {
         var msg = new UiMessage
         {
@@ -28,7 +28,8 @@ internal sealed class ScenarioBuilder
             Message = message,
             AppName = appName,
             InstallDir = installDir,
-            BrandingImage = brandingImage
+            BrandingImage = brandingImage,
+            ShowWelcome = showWelcome ? true : null
         };
         return Raw(msg);
     }

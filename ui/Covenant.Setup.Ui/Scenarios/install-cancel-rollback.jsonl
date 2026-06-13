@@ -1,6 +1,6 @@
 # install-cancel-rollback: user clicks Cancel mid-install, engine rolls back in the same window
 # The scenario blocks at await_response until the Cancel button is clicked.
-{"type":"init","title":"Installing SampleApp","message":"Preparing...","total_steps":8,"app_name":"SampleApp","install_dir":"C:\\Program Files\\SampleApp"}
+{"type":"init","show_welcome":true,"title":"Installing SampleApp","message":"Preparing...","total_steps":8,"app_name":"SampleApp","install_dir":"C:\\Program Files\\SampleApp"}
 {"await_response":{"id":"welcome","expect":"install"}}
 {"wait_ms": 400}
 {"type":"progress","current_step":1,"total_steps":8,"message":"Creating directories"}

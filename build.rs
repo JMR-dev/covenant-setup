@@ -17,9 +17,13 @@ fn main() {
 
 fn publish_csharp_ui() {
     println!("cargo:rerun-if-changed=ui/Covenant.Setup.Ui/Covenant.Setup.Ui.csproj");
+    println!("cargo:rerun-if-changed=ui/Covenant.Setup.Ui/App.xaml");
     println!("cargo:rerun-if-changed=ui/Covenant.Setup.Ui/Program.cs");
     println!("cargo:rerun-if-changed=ui/Covenant.Setup.Ui/InstallerUiWindow.cs");
+    println!("cargo:rerun-if-changed=ui/Covenant.Setup.Ui/InstallerSessionController.cs");
+    println!("cargo:rerun-if-changed=ui/Covenant.Setup.Ui/IInstallerView.cs");
     println!("cargo:rerun-if-changed=ui/Covenant.Setup.Ui/UiProtocol.cs");
+    println!("cargo:rerun-if-changed=ui/Covenant.Setup.Ui/Mocking");
     println!("cargo:rerun-if-changed=ui/Covenant.Setup.Ui/app.manifest");
 
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());

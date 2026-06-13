@@ -129,51 +129,95 @@ try {
     $env:COVENANT_SETUP_TRACE_DIR = $TracePath
     Write-TraceEvent -Phase "trace_environment_set" -Detail @{ name = "COVENANT_SETUP_TRACE_DIR"; value = $TracePath }
 
-    $installer = Start-Process -FilePath $InstallerPath -ArgumentList $InstallerArguments -PassThru
-    Write-TraceEvent -Phase "installer_process_started" -Detail @{ pid = $installer.Id; operationName = $OperationName }
-
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-    $lastPoll = Get-Date "2000-01-01"
-    while (-not $installer.HasExited) {
-        if ((Get-Date) -ge $deadline) {
-            Export-InstallerDiagnostics -Reason "installer_timeout" -InstallerProcess $installer
-            Stop-Process -Id $installer.Id -Force -ErrorAction SilentlyContinue
-            throw "Installer timed out after $TimeoutSeconds seconds."
+    $testProjectDir = "C:\Users\vagrant\AppData\Local\Temp\covenant-setup-smoke\ui\Covenant.Setup.Ui.Tests"
+    if (Test-Path -LiteralPath "$testProjectDir\Covenant.Setup.Ui.Tests.csproj") {
+        $env:COVENANT_REAL_INSTALLER_PATH = $InstallerPath
+        $env:COVENANT_REAL_INSTALLER_ARGS = $InstallerArguments -join ' '
+        Write-TraceEvent -Phase "running_ui_automation_tests" -Detail @{
+            installerPath = $InstallerPath
+            arguments = $InstallerArguments
         }
+        
+        $dotnetPath = "C:\Users\vagrant\dotnet\dotnet.exe"
+        if (-not (Test-Path -LiteralPath $dotnetPath)) {
+            $dotnetPath = "dotnet"
+        }
+        
+        Write-TraceEvent -Phase "executing_dotnet_test" -Detail @{
+            dotnetPath = $dotnetPath
+            project = "$testProjectDir\Covenant.Setup.Ui.Tests.csproj"
+        }
+        
+        $stdoutLog = Join-Path $TracePath "dotnet-test.log"
+        $stderrLog = Join-Path $TracePath "dotnet-test-error.log"
+        
+        $process = Start-Process -FilePath $dotnetPath -ArgumentList @("test", "$testProjectDir\Covenant.Setup.Ui.Tests.csproj", "--filter", "FullyQualifiedName=Covenant.Setup.Ui.Tests.InstallerUiAutomationTests.TestRealInstallUninstallFlow") -PassThru -NoNewWindow -Wait -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog
+        
+        Write-TraceEvent -Phase "dotnet_test_finished" -Detail @{ exitCode = $process.ExitCode }
+        
+        $result = [ordered]@{
+            success      = ($process.ExitCode -eq 0)
+            exitCode     = [int]$process.ExitCode
+            installerPath = $InstallerPath
+            installerArgs = $InstallerArguments
+            operationName = $OperationName
+            tracePath     = $TracePath
+            startedAt    = $startedAt.ToString("o")
+            finishedAt   = (Get-Date).ToString("o")
+        }
+        $result | ConvertTo-Json | Set-Content -LiteralPath $ResultPath -Encoding UTF8
+        
+        if ($process.ExitCode -ne 0) {
+            exit $process.ExitCode
+        }
+    }
+    else {
+        $installer = Start-Process -FilePath $InstallerPath -ArgumentList $InstallerArguments -PassThru
+        Write-TraceEvent -Phase "installer_process_started" -Detail @{ pid = $installer.Id; operationName = $OperationName }
 
-        if (((Get-Date) - $lastPoll).TotalSeconds -ge 10) {
-            $lastPoll = Get-Date
-            $installer.Refresh()
-            Write-TraceEvent -Phase "installer_still_running" -Detail @{
-                pid            = $installer.Id
-                operationName  = $OperationName
-                elapsedSeconds = [int]((Get-Date) - $startedAt).TotalSeconds
-                responding     = $installer.Responding
-                mainWindow     = $installer.MainWindowTitle
+        $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+        $lastPoll = Get-Date "2000-01-01"
+        while (-not $installer.HasExited) {
+            if ((Get-Date) -ge $deadline) {
+                Export-InstallerDiagnostics -Reason "installer_timeout" -InstallerProcess $installer
+                Stop-Process -Id $installer.Id -Force -ErrorAction SilentlyContinue
+                throw "Installer timed out after $TimeoutSeconds seconds."
             }
+
+            if (((Get-Date) - $lastPoll).TotalSeconds -ge 10) {
+                $lastPoll = Get-Date
+                $installer.Refresh()
+                Write-TraceEvent -Phase "installer_still_running" -Detail @{
+                    pid            = $installer.Id
+                    operationName  = $OperationName
+                    elapsedSeconds = [int]((Get-Date) - $startedAt).TotalSeconds
+                    responding     = $installer.Responding
+                    mainWindow     = $installer.MainWindowTitle
+                }
+            }
+
+            Start-Sleep -Seconds 2
+            $installer.Refresh()
         }
 
-        Start-Sleep -Seconds 2
-        $installer.Refresh()
-    }
+        Write-TraceEvent -Phase "installer_process_exited" -Detail @{ pid = $installer.Id; exitCode = $installer.ExitCode; operationName = $OperationName }
+        Export-InstallerDiagnostics -Reason "installer_exit" -InstallerProcess $installer
 
-    Write-TraceEvent -Phase "installer_process_exited" -Detail @{ pid = $installer.Id; exitCode = $installer.ExitCode; operationName = $OperationName }
-    Export-InstallerDiagnostics -Reason "installer_exit" -InstallerProcess $installer
+        $result = [ordered]@{
+            success      = ($installer.ExitCode -eq 0)
+            exitCode     = [int]$installer.ExitCode
+            installerPath = $InstallerPath
+            installerArgs = $InstallerArguments
+            operationName = $OperationName
+            tracePath     = $TracePath
+            startedAt    = $startedAt.ToString("o")
+            finishedAt   = (Get-Date).ToString("o")
+        }
+        $result | ConvertTo-Json | Set-Content -LiteralPath $ResultPath -Encoding UTF8
 
-    $result = [ordered]@{
-        success      = ($installer.ExitCode -eq 0)
-        exitCode     = [int]$installer.ExitCode
-        installerPath = $InstallerPath
-        installerArgs = $InstallerArguments
-        operationName = $OperationName
-        tracePath     = $TracePath
-        startedAt    = $startedAt.ToString("o")
-        finishedAt   = (Get-Date).ToString("o")
-    }
-    $result | ConvertTo-Json | Set-Content -LiteralPath $ResultPath -Encoding UTF8
-
-    if ($installer.ExitCode -ne 0) {
-        exit $installer.ExitCode
+        if ($installer.ExitCode -ne 0) {
+            exit $installer.ExitCode
+        }
     }
 }
 catch {
